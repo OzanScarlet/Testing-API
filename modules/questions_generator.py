@@ -7,8 +7,8 @@ from openai import OpenAI, RateLimitError
 
 load_dotenv()
 
-MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
-BASE_URL = os.getenv("BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME = os.getenv("MODEL_NAME")
+BASE_URL = os.getenv("BASE_URL")
 DEFAULT_FOLDER = "data"
 OUTPUT_DIR = "output"
 
@@ -28,12 +28,6 @@ current_delay = DELAY_BETWEEN_FILES
 
 def get_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
-    if "groq" in BASE_URL.lower():
-        api_key = os.getenv("GROQ_API_KEY", api_key)
-    elif "deepseek" in BASE_URL.lower():
-        api_key = os.getenv("DEEPSEEK_API_KEY", api_key)
-    # Beberapa relay/proxy API memblokir User-Agent khas OpenAI SDK ("OpenAI/Python ..."),
-    # sehingga perlu ditimpa dengan UA netral.
     return OpenAI(
         api_key=api_key,
         base_url=BASE_URL,
@@ -76,8 +70,7 @@ def read_documents(folder_path: str) -> list:
 def split_document(text: str) -> list:
     """
     Memecah dokumen menjadi chunk kecil (per heading / per batas karakter)
-    agar tiap request API ringan dan tidak kena limit token.
-    Hasil harus deterministik agar resume per-chunk tetap valid.
+
     """
     lines = text.splitlines()
     chunks = []
@@ -104,22 +97,17 @@ def split_document(text: str) -> list:
 
 
 def pace():
-    """Jeda sebelum tiap request supaya tidak kena rate limit."""
     time.sleep(current_delay)
 
 
 def bump_delay():
-    """Naikkan jeda secara adaptif ketika kena rate limit."""
+    """Naikkan jeda secara adaptif."""
     global current_delay
     current_delay = min(current_delay * 2, MAX_DELAY)
     print(f"[RATE LIMIT] Delay dinaikkan menjadi {current_delay:.0f} detik.")
 
 
 def wait_from_headers(e: RateLimitError, fallback: float) -> float:
-    """
-    Membaca header rate-limit dari respons 429 untuk tahu persis
-    harus menunggu berapa lama (retry-after / reset tokens).
-    """
     headers = getattr(getattr(e, "response", None), "headers", None) or {}
 
     def _to_secs(value):
@@ -152,7 +140,7 @@ def wait_from_headers(e: RateLimitError, fallback: float) -> float:
 def generate_questions(chunk_text: str) -> list:
     """
     Mengirimkan satu chunk ke API untuk menghasilkan daftar PERTANYAAN saja
-    (tanpa jawaban). Output dibatasi agar cepat dan hemat token.
+    . Output dibatasi agar cepat dan hemat token.
     """
     if not chunk_text.strip():
         return []
@@ -217,10 +205,6 @@ def generate_questions(chunk_text: str) -> list:
 
 
 def output_path_for(folder_path: str) -> str:
-    """
-    Folder utama 'data' -> output/questions.json.
-    Subfolder -> output/questions_<nama-folder>.json.
-    """
     path = Path(folder_path).resolve()
     default_root = Path(DEFAULT_FOLDER).resolve()
     if path == default_root:
