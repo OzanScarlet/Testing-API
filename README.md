@@ -1,13 +1,13 @@
-# Testing-API — Generator Pertanyaan dari Dokumen MD
+# Testing-API — Evaluasi Chatbot RAG Kelapa Sawit
 
-Membaca semua dokumen `*.md` di dalam folder (rekursif), lalu LLM generate daftar pertanyaan uji per chunk, disimpan ke `output/questions.json`.
+Membaca semua dokumen `*.md` di dalam folder (rekursif), lalu LLM generate daftar pertanyaan uji per chunk, disimpan ke `output/questions.json`. Pertanyaan-pertanyaan itu lalu dikirim ke chatbot (FastAPI staging), jawabannya diambil dari trace Phoenix, lalu dinilai AI judge (3 kriteria) — bisa interaktif lewat terminal atau lewat UI Gradio.
 
 ## Cara menjalankan
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # lalu isi API key
-python modules/questions_generator.py            # proses folder data/
+python modules/questions_generator.py            # generate pertanyaan (folder data/)
 python modules/questions_generator.py data/ksi   # proses folder tertentu
 ```
 
@@ -18,32 +18,48 @@ Output: `output/questions.json`. Jalankan ulang untuk **resume otomatis** — fi
 | File | Fungsi |
 |------|--------|
 | `modules/questions_generator.py` | Generator pertanyaan (chunk → LLM → `{"questions": [...]}`) |
-| `test_chat.py` | Kirim pertanyaan ke chatbot (staging) via form-data |
-| `test_phoenix_get.py` | Kirim pertanyaan, lalu ambil jawaban dari trace Phoenix |
+| `modules/staging_client.py` | Kirim 1 pertanyaan ke chatbot (interaktif, terminal) |
+| `modules/phoenix_extractor.py` | POST + ambil jawaban dari trace Phoenix |
+| `modules/judge.py` | POST → ambil trace → nilai 3 kriteria (interaktif, terminal) |
+| `modules/gradio_app.py` | UI Gradio: tulis pertanyaan → POST → trace → judge |
 | `data/` | Kumpulan dokumen `.md` sumber |
 | `output/questions.json` | Hasil generate |
 
 ## Kirim pertanyaan ke chatbot
 
-Pakai script `test_chat.py` (interaktif):
-
 ```bash
-python test_chat.py
+python modules/staging_client.py
 # lalu ketik pertanyaan di prompt
 ```
 
-Script mengirim POST `form-data` (key `content` = pertanyaan) dengan header `x-api-key` ke chatbot. URL & key dibaca dari `.env` (`CHATOPA_URL`, `CHATOPA_API_KEY` — isi key manual).
+Script mengirim POST `form-data` (key `content` = pertanyaan) dengan header `x-api-key` ke chatbot. URL & key dibaca dari `.env` (`CHATOPA_URL`, `CHATOPA_API_KEY`).
 
-## Kirim pertanyaan & ambil jawaban dari Phoenix
-
-Pakai `test_phoenix_get.py` (interaktif) — jawaban diambil dari trace di Phoenix, bukan dari response POST langsung:
+## Ambil jawaban dari trace Phoenix
 
 ```bash
-python test_phoenix_get.py
+python modules/phoenix_extractor.py
 # lalu ketik pertanyaan di prompt
 ```
 
-Alurnya: POST pertanyaan → ambil `request_id` dari response → cari LLM span di Phoenix yang `attributes.metadata.request_id`-nya cocok → ambil jawaban dari `attributes.output.value` (polling hingga trace muncul).
+Alur: POST pertanyaan → ambil `request_id` dari response → cari LLM span di Phoenix yang `attributes.metadata.request_id`-nya cocok → ambil jawaban dari `attributes.output.value` (polling hingga trace muncul, default 30 detik).
+
+## Nilai jawaban dengan AI judge
+
+```bash
+python modules/judge.py
+# lalu ketik pertanyaan di prompt
+```
+
+Alur: POST pertanyaan → ambil jawaban FastAPI + `request_id` → ambil jawaban acuan dari trace Phoenix → nilai 3 kriteria (akurasi, kelengkapan, kesesuaian konteks), skor 0–10 + label + kesimpulan.
+
+## UI Gradio
+
+```bash
+python modules/gradio_app.py
+# lalu buka http://127.0.0.1:7860
+```
+
+Tulis pertanyaan, klik **Evaluasi** — hasilnya menampilkan jawaban FastAPI, jawaban trace Phoenix, dan penilaian judge.
 
 Konfigurasi dibaca dari `.env`:
 - `PHOENIX_BASE_URL` — base URL Phoenix (contoh `https://phoenix.example.com`)
