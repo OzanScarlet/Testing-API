@@ -1,10 +1,14 @@
 import json
 import os
+import sys
 import time
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.phoenix_extractor import find_answer_in_phoenix
 
