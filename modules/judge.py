@@ -10,7 +10,7 @@ from openai import OpenAI, RateLimitError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from modules.phoenix_extractor import find_answer_in_phoenix
+from modules.phoenix_extractor import get_retrieval_context
 
 load_dotenv()
 
@@ -51,20 +51,24 @@ def get_answer(question: str) -> tuple:
     return answer, request_id
 
 
-def judge_answer(question: str, fastapi_answer: str, trace_answer: str) -> dict:
-    """Nilai jawaban FastAPI dengan 3 kriteria, memakai jawaban trace sebagai acuan."""
+def judge_answer(question: str, fastapi_answer: str, retrieval_context: str) -> dict:
+    """Nilai jawaban FastAPI dengan 3 kriteria, memakai konteks retrieval
+    dari trace Phoenix sebagai acuan (dokumen yang diretriev sistem)."""
     system_prompt = (
         "Kamu adalah evaluator kualitas jawaban chatbot RAG kelapa sawit. "
-        "Nilai jawaban yang ditampilkan ke user (dari FastAPI) dengan acuan jawaban "
-        "yang tercatat di trace (dari Phoenix) — trace dianggap sebagai jawaban yang "
-        "dibuat sistem berdasarkan konteks dokumen.\n"
+        "Nilai jawaban yang ditampilkan ke user (dari FastAPI) dengan acuan "
+        "KONTEKS DOKUMEN HASIL RETRIEVAL dari tracing (dari Phoenix). "
+        "Konteks retrieval adalah kumpulan potongan dokumen yang diambil sistem "
+        "untuk menjawab pertanyaan. Periksa apakah setiap klaim di jawaban "
+        "didukung oleh isi konteks retrieval, dan deteksi halusinasi (klaim yang "
+        "tidak ada atau bertentangan dengan konteks).\n"
         "Nilai berdasarkan tiga kriteria:\n"
-        "1. Akurasi pertanyaan dan jawaban: seberapa tepat dan benar jawaban menjawab "
-        "pertanyaan dibanding acuan.\n"
-        "2. Kelengkapan jawaban: seberapa lengkap jawaban mencakup poin penting yang ada "
-        "di acuan.\n"
-        "3. Kesesuaian jawaban dengan konteks: seberapa sesuai jawaban dengan isi acuan, "
-        "tidak bertentangan.\n"
+        "1. Akurasi pertanyaan dan jawaban: seberapa tepat dan benar jawaban "
+        "menjawab pertanyaan, tanpa kesalahan faktual.\n"
+        "2. Kelengkapan jawaban: seberapa lengkap jawaban mencakup poin penting "
+        "yang tersedia di konteks retrieval untuk pertanyaan itu.\n"
+        "3. Kesesuaian jawaban dengan konteks: seberapa sesuai jawaban dengan isi "
+        "konteks retrieval, tidak ada klaim yang tidak didukung (halusinasi).\n"
         "Berikan skor 0-10 per kriteria dengan alasan singkat, lalu total (rata-rata) "
         "dan kesimpulan.\n"
         "OUTPUT WAJIB BERFORMAT JSON DENGAN STRUKTUR KETAT TANPA KUNCI LAIN.\n"
@@ -81,7 +85,7 @@ def judge_answer(question: str, fastapi_answer: str, trace_answer: str) -> dict:
     user_prompt = (
         f"Pertanyaan:\n{question}\n\n"
         f"Jawaban yang ditampilkan ke user (FastAPI):\n{fastapi_answer}\n\n"
-        f"Acuan (jawaban di trace Phoenix):\n{trace_answer or '(tidak ada acuan)'}"
+        f"Acuan (konteks retrieval dari trace Phoenix):\n{retrieval_context or '(tidak ada konteks retrieval)'}"
     )
 
     client = get_client()
@@ -137,15 +141,15 @@ def main():
     print(f"Jawaban (FastAPI):\n{answer[:500]}")
     print(f"Request id: {request_id}")
 
-    print("Ambil jawaban dari trace Phoenix...")
-    trace_answer = find_answer_in_phoenix(request_id, question)
-    if trace_answer is None:
-        print("Trace untuk request ini tidak ditemukan di Phoenix. Coba lagi nanti.")
+    print("Ambil konteks retrieval dari trace Phoenix...")
+    retrieval_context = get_retrieval_context(request_id, question)
+    if retrieval_context is None:
+        print("Konteks retrieval tidak ditemukan di Phoenix. Coba lagi nanti.")
         return
-    print(f"Jawaban (trace):\n{trace_answer[:500]}")
+    print(f"Konteks retrieval:\n{retrieval_context[:500]}...")
 
     print("Menilai jawaban...")
-    result = judge_answer(question, answer, trace_answer)
+    result = judge_answer(question, answer, retrieval_context)
     print("\n=== HASIL PENILAIAN ===")
     for key in ("akurasi", "kelengkapan", "kesesuaian"):
         item = result.get(key, {})

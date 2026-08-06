@@ -15,7 +15,7 @@ PHOENIX_BASE_URL = os.getenv("PHOENIX_BASE_URL")
 PHOENIX_PROJECT_NAME = os.getenv("PHOENIX_PROJECT_NAME")
 
 POLL_INTERVAL = 2.0
-POLL_TIMEOUT = 30.0
+POLL_TIMEOUT = 60.0
 
 
 def extract_request_id(response):
@@ -52,19 +52,25 @@ def parse_answer(output_value):
         return text
 
 
-def find_answer_in_phoenix(request_id, question):
-    """Cari LLM span di Phoenix yang request_id atau teks pertanyaannya cocok,
-    lalu ambil output jawabannya. Polling sampai trace muncul."""
+def _find_trace_id(request_id, question):
+    """Polling cari LLM span yang request_id / teks pertanyaannya cocok,
+    kembalikan context.trace_id (atau None)."""
     client = Client(base_url=PHOENIX_BASE_URL)
     deadline = time.time() + POLL_TIMEOUT
     norm_question = " ".join(question.split())
 
     while time.time() < deadline:
-        df = client.spans.get_spans_dataframe(
-            project_name=PHOENIX_PROJECT_NAME,
-            start_time=datetime.now() - timedelta(minutes=3),
-            limit=1000,
-        )
+        try:
+            df = client.spans.get_spans_dataframe(
+                project_name=PHOENIX_PROJECT_NAME,
+                start_time=datetime.now() - timedelta(minutes=3),
+                limit=1000,
+                timeout=30,
+            )
+        except Exception as e:
+            print(f"[PHOENIX] Gagal query spans (timeout/error): {e}")
+            time.sleep(POLL_INTERVAL)
+            continue
         if df is not None and not df.empty:
             for _, row in df.iterrows():
                 if row.get("span_kind") != "LLM":
@@ -75,12 +81,121 @@ def find_answer_in_phoenix(request_id, question):
                     and norm_question in " ".join(str(row.get("attributes.input.value", "")).split())
                 )
                 if matches:
-                    output = row.get("attributes.output.value")
-                    if output is not None:
-                        return parse_answer(output)
+                    trace_id = row.get("context.trace_id")
+                    if trace_id:
+                        return trace_id
         time.sleep(POLL_INTERVAL)
 
     return None
+
+
+def get_answer_from_trace(trace_id):
+    """GET trace spesifik via trace_ids, ambil jawaban dari LLM span yang
+    output-nya berisi kunci 'content' (jawaban final), bukan plan/intent."""
+    client = Client(base_url=PHOENIX_BASE_URL)
+    spans = client.spans.get_spans(
+        project_identifier=PHOENIX_PROJECT_NAME,
+        trace_ids=[trace_id],
+        limit=100,
+        timeout=30,
+    )
+    llm_spans = [s for s in spans if s.get("span_kind") == "LLM"]
+    if not llm_spans:
+        return None
+    for span in llm_spans:
+        attrs = span.get("attributes") or {}
+        output = attrs.get("output.value")
+        if output is None:
+            continue
+        parsed = parse_answer(output)
+        stripped = parsed.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            continue
+        if stripped:
+            return parsed
+    return None
+
+
+def get_retrieval_context(request_id, question):
+    """Cari trace via polling, lalu ambil konteks retrieval dari span
+    retrieve_context_and_extract. Output.value bisa berupa JSON dict
+    (retrieval.context) atau string repr Python (retrieval=RetrievalOutput(context="...")).
+    Return string atau None."""
+    trace_id = _find_trace_id(request_id, question)
+    if trace_id is None:
+        return None
+
+    client = Client(base_url=PHOENIX_BASE_URL)
+    deadline = time.time() + POLL_TIMEOUT
+
+    while time.time() < deadline:
+        try:
+            spans = client.spans.get_spans(
+                project_identifier=PHOENIX_PROJECT_NAME,
+                trace_ids=[trace_id],
+                limit=100,
+                timeout=30,
+            )
+        except Exception as e:
+            print(f"[PHOENIX] Gagal get_spans (timeout/error): {e}")
+            time.sleep(POLL_INTERVAL)
+            continue
+
+        for span in spans:
+            if span.get("name") != "retrieve_context_and_extract":
+                continue
+            attrs = span.get("attributes") or {}
+            output_value = attrs.get("output.value")
+            if not isinstance(output_value, str):
+                continue
+            context = _extract_retrieval_context(output_value)
+            if context:
+                return context
+
+        time.sleep(POLL_INTERVAL)
+
+    return None
+
+
+def _extract_retrieval_context(output_value):
+    """Ekstrak konteks retrieval dari output.value span retrieve_context_and_extract.
+    Mendukung format JSON dict maupun string repr Python."""
+    try:
+        data = json.loads(output_value)
+    except (ValueError, TypeError):
+        return None
+
+    if isinstance(data, dict):
+        retrieval = data.get("retrieval") or {}
+        context = retrieval.get("context")
+        if isinstance(context, str) and context.strip():
+            return context
+        return None
+
+    if isinstance(data, str):
+        marker = "retrieval=RetrievalOutput(context="
+        start = data.find(marker)
+        if start == -1:
+            return None
+        quote = data.find('"', start + len(marker))
+        if quote == -1:
+            return None
+        end = data.find('",', quote + 1)
+        if end == -1:
+            return None
+        context = data[quote + 1 : end]
+        if context.strip():
+            return context
+
+    return None
+
+
+def find_answer_in_phoenix(request_id, question):
+    """Cari trace_id via polling, lalu GET trace spesifik dan ambil jawabannya."""
+    trace_id = _find_trace_id(request_id, question)
+    if trace_id is None:
+        return None
+    return get_answer_from_trace(trace_id)
 
 
 def main():

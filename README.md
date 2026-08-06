@@ -19,9 +19,9 @@ Output: `output/questions.json`. Jalankan ulang untuk **resume otomatis** — fi
 |------|--------|
 | `modules/questions_generator.py` | Generator pertanyaan (chunk → LLM → `{"questions": [...]}`) |
 | `modules/staging_client.py` | Kirim 1 pertanyaan ke chatbot (interaktif, terminal) |
-| `modules/phoenix_extractor.py` | POST + ambil jawaban dari trace Phoenix |
+| `modules/phoenix_extractor.py` | POST + ambil jawaban / konteks retrieval dari trace Phoenix (span `retrieve_context_and_extract`) |
 | `modules/judge.py` | POST → ambil trace → nilai 3 kriteria (interaktif, terminal) |
-| `modules/gradio_app.py` | UI Gradio: tulis pertanyaan → POST → trace → judge |
+| `modules/gradio_app.py` | Dashboard Gradio: 2 tab (Evaluasi Manual + Rekapitulasi). Manual: pilih dokumen → pertanyaan auto sequence 1 per 1 (atau ketik manual) → POST → trace → judge (tabel + grafik), hasil disimpan ke `output/evaluations.jsonl`. Rekapitulasi: tabel hasil dari jsonl |
 | `data/` | Kumpulan dokumen `.md` sumber |
 | `output/questions.json` | Hasil generate |
 
@@ -41,7 +41,7 @@ python modules/phoenix_extractor.py
 # lalu ketik pertanyaan di prompt
 ```
 
-Alur: POST pertanyaan → ambil `request_id` dari response → cari LLM span di Phoenix yang `attributes.metadata.request_id`-nya cocok → ambil jawaban dari `attributes.output.value` (polling hingga trace muncul, default 30 detik).
+Alur: POST pertanyaan → ambil `request_id` dari response → cari trace di Phoenix yang `attributes.metadata.request_id`-nya cocok (polling hingga trace muncul, default 60 detik) → ambil jawaban dari `attributes.output.value`, atau konteks retrieval dari span `retrieve_context_and_extract` (`output.value.retrieval.context`). Konteks retrieval dibaca dari span ini sesuai arahan pembimbing (bukan `_choose_agent`).
 
 ## Nilai jawaban dengan AI judge
 
@@ -50,7 +50,9 @@ python modules/judge.py
 # lalu ketik pertanyaan di prompt
 ```
 
-Alur: POST pertanyaan → ambil jawaban FastAPI + `request_id` → ambil jawaban acuan dari trace Phoenix → nilai 3 kriteria (akurasi, kelengkapan, kesesuaian konteks), skor 0–10 + label + kesimpulan.
+Alur: POST pertanyaan → ambil jawaban FastAPI + `request_id` → ambil **konteks retrieval** dari trace Phoenix (dokumen hasil retrieval, bukan jawaban trace) → nilai 3 kriteria (akurasi, kelengkapan, kesesuaian konteks), skor 0–10 + label + kesimpulan.
+
+> Catatan: yang dinilai adalah **jawaban FastAPI** (yang dilihat user). Acuan penilaiannya **konteks retrieval** dari trace Phoenix — karena trace merekam request yang sama persis dengan yang dikirim ke FastAPI, membandingkan jawaban FastAPI vs jawaban trace tidak bermakna (hasilnya selalu sama).
 
 ## UI Gradio
 
@@ -59,7 +61,17 @@ python modules/gradio_app.py
 # lalu buka http://127.0.0.1:7860
 ```
 
-Tulis pertanyaan, klik **Evaluasi** — hasilnya menampilkan jawaban FastAPI, jawaban trace Phoenix, dan penilaian judge.
+Dashboard 2 tab:
+
+**Tab Evaluasi Manual** — pilih **dokumen** (dari `output/questions.json`) → pertanyaan **diload otomatis satu per satu** (auto sequence 1 per 1), melewati yang sudah dinilai. Bisa juga **ketik manual**. Klik **Evaluasi**:
+
+- Semua hasil sebelumnya langsung dibersihkan saat tombol ditekan.
+- **Tengah**: jawaban FastAPI (Chatbot) di kiri; **konteks retrieval** dari trace Phoenix di kanan.
+- **Bawah**: **tabel skor judge** (Akurasi / Kelengkapan / Kesesuaian / Total) + **grafik batang** per kriteria + ringkasan.
+- Setelah evaluasi selesai, pertanyaan otomatis maju ke pertanyaan berikutnya yang belum dinilai.
+- Setiap hasil evaluasi disimpan ke `output/evaluations.jsonl` (satu baris JSON per evaluasi: timestamp, pertanyaan, request_id, jawaban, preview konteks, skor 3 kriteria, total, label, kesimpulan, latency).
+
+**Tab Rekapitulasi** — tabel semua hasil evaluasi dari `output/evaluations.jsonl` (Timestamp, Pertanyaan, Total, Label, Request ID); klik **Muat Ulang** untuk refresh.
 
 Konfigurasi dibaca dari `.env`:
 - `PHOENIX_BASE_URL` — base URL Phoenix (contoh `https://phoenix.example.com`)

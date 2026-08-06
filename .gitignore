@@ -1,5 +1,9 @@
 data/
 __pycache__/
+
+# Hasil evaluasi (terus bertambah per evaluasi)
+output/evaluations.jsonl
+output/evaluations.csv
 *.py[codz]
 *$py.class
 
