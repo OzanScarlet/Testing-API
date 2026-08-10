@@ -17,11 +17,11 @@ Output: `output/questions.json`. Jalankan ulang untuk **resume otomatis** — fi
 
 | File | Fungsi |
 |------|--------|
-| `modules/questions_generator.py` | Generator pertanyaan (chunk → LLM → `{"questions": [...]}`) |
+| `modules/questions_generator.py` | Generator pertanyaan (chunk → LLM → `{"questions": [...]}`). Untuk folder/CLI (`.md`) atau upload multi-file (`.md/.txt/.pdf/.docx/.doc` via `generate_questions_from_files`) |
 | `modules/staging_client.py` | Kirim 1 pertanyaan ke chatbot (interaktif, terminal) |
 | `modules/phoenix_extractor.py` | POST + ambil jawaban / konteks retrieval dari trace Phoenix (span `retrieve_context_and_extract`) |
 | `modules/judge.py` | POST → ambil trace → nilai 3 kriteria (interaktif, terminal) |
-| `modules/gradio_app.py` | Dashboard Gradio: 2 tab (Evaluasi Manual + Rekapitulasi). Manual: pilih dokumen → pertanyaan auto sequence 1 per 1 (atau ketik manual) → POST → trace → judge (tabel + grafik), hasil disimpan ke `output/evaluations.jsonl`. Rekapitulasi: tabel hasil dari jsonl |
+| `modules/gradio_app.py` | Dashboard Gradio: 2 tab (Evaluasi + Rekapitulasi). Evaluasi: pilih dokumen → pertanyaan auto sequence 1 per 1 (atau ketik manual) → POST → trace → judge (tabel + grafik), hasil disimpan ke `output/evaluations.jsonl`. Bisa **Auto Evaluasi** (semua file berurutan tanpa klik, pindah file otomatis, retry sampai sukses) atau **1 Tombol Generate → Evaluasi** (upload banyak file `.md/.txt/.pdf/.docx/.doc` → generate pertanyaan → langsung POST → trace → judge). Rekapitulasi: tabel hasil dari jsonl |
 | `data/` | Kumpulan dokumen `.md` sumber |
 | `output/questions.json` | Hasil generate |
 
@@ -63,9 +63,14 @@ python modules/gradio_app.py
 
 Dashboard 2 tab:
 
-**Tab Evaluasi Manual** — pilih **dokumen** (dari `output/questions.json`) → pertanyaan **diload otomatis satu per satu** (auto sequence 1 per 1), melewati yang sudah dinilai. Bisa juga **ketik manual**. Klik **Evaluasi**:
+**Tab Evaluasi** — pilih **dokumen** (dari `output/questions.json`) → pertanyaan **diload otomatis satu per satu** (auto sequence 1 per 1), melewati yang sudah dinilai. Bisa juga **ketik manual**. Tombol:
 
-- Semua hasil sebelumnya langsung dibersihkan saat tombol ditekan.
+- **Evaluasi** — menilai satu pertanyaan (pertanyaan aktif dari dokumen, atau manual). Semua hasil sebelumnya langsung dibersihkan saat tombol ditekan.
+- **Auto Evaluasi** — menilai **semua dokumen berurutan tanpa klik**. Untuk tiap pertanyaan: pipeline POST → trace → judge dijalankan dengan **retry** sampai semua step keluar hasil; baru setelah soal berhasil lanjut ke soal berikutnya. Setelah seluruh soal satu dokumen tuntas, otomatis pindah ke dokumen berikutnya (dropdown ikut berpindah). Jika suatu soal gagal dinilai setelah 10 percobaan, proses **dihentikan** (soal tidak dianggap selesai) agar tidak ada step/pertanyaan yang tertinggal — periksa tracing/retrieval, lalu klik Auto Evaluasi lagi.
+- **1 Tombol: Generate → Evaluasi** — **upload satu atau beberapa file** (`.md`, `.txt`, `.pdf`, `.docx`, `.doc`), satu klik menjalankan seluruh alur: **generate pertanyaan** dari file-file tersebut → langsung **POST** ke chatbot → bandingkan dengan **trace Phoenix** → nilai **judge**, untuk semua pertanyaan secara otomatis. Hasil generate tersimpan ke `output/questions_upload.json`.
+- **Stop** — menghentikan Auto Evaluasi / Generate→Evaluasi.
+
+Bagian tampilan:
 - **Tengah**: jawaban FastAPI (Chatbot) di kiri; **konteks retrieval** dari trace Phoenix di kanan.
 - **Bawah**: **tabel skor judge** (Akurasi / Kelengkapan / Kesesuaian / Total) + **grafik batang** per kriteria + ringkasan.
 - Setelah evaluasi selesai, pertanyaan otomatis maju ke pertanyaan berikutnya yang belum dinilai.

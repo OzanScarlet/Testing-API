@@ -365,6 +365,160 @@ def process_folder(folder_path: str = DEFAULT_FOLDER, output_file: str = None) -
     return result
 
 
+def extract_text(file_path: str) -> str:
+    """Ekstrak teks dari file: .md/.txt (langsung), .pdf (pypdf),
+    .docx (python-docx), .doc (best-effort). Return str (bisa kosong)."""
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+
+    if suffix in (".md", ".txt"):
+        for enc in ("utf-8", "utf-8-sig", "latin-1"):
+            try:
+                return path.read_text(encoding=enc)
+            except UnicodeDecodeError:
+                continue
+        return path.read_text(encoding="latin-1", errors="replace")
+
+    if suffix == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(str(path))
+        pages = []
+        for page in reader.pages:
+            try:
+                pages.append(page.extract_text() or "")
+            except Exception:
+                continue
+        return "\n\n".join(pages)
+
+    if suffix == ".docx":
+        import docx
+        d = docx.Document(str(path))
+        parts = [p.text for p in d.paragraphs]
+        for table in d.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    parts.append(cell.text)
+        return "\n".join(parts)
+
+    if suffix == ".doc":
+        # Best-effort: coba baca sebagai docx (kalau sebenarnya docx), lalu teks polos.
+        try:
+            import docx
+            d = docx.Document(str(path))
+            return "\n".join(p.text for p in d.paragraphs)
+        except Exception:
+            try:
+                return path.read_text(encoding="latin-1", errors="replace")
+            except Exception:
+                return ""
+
+    return ""
+
+
+def iter_generate_questions_from_files(file_paths: list, output_file: str = None):
+    """Generator STREAMING: proses banyak file (.md/.txt/.pdf/.docx/.doc)
+    dan yield tiap hasil chunk begitu selesai digenerate.
+
+    Yield tuple per chunk:
+        (source, chunk_idx, chunk_total, list_questions, item, items)
+
+    - source      : nama file
+    - chunk_idx   : index chunk (0-based)
+    - chunk_total : jumlah chunk di file itu
+    - list_questions : daftar pertanyaan hasil generate chunk tsb
+    - item        : item file yang sedang diisi (source/path/questions/done_chunks)
+    - items       : list item yang sudah selesai sejauh ini
+
+    Setiap chunk selesai, snapshot hasil (build_result + save_to_json) ditulis
+    ke output_file (default output/questions_upload.json) supaya progres tidak
+    hilang meski proses terputus.
+
+    Caller bertanggung jawab mengevaluasi tiap pertanyaan dari list_questions
+    sebelum meminta yield berikutnya."""
+    print("=== QUESTIONS GENERATOR (STREAMING, MULTI FILE) ===")
+    if output_file is None:
+        output_file = os.path.join(OUTPUT_DIR, "questions_upload.json")
+
+    items = []
+
+    for file_path in file_paths:
+        path = Path(file_path)
+        print(f"[INFO] File: {path.name}")
+        try:
+            content = extract_text(str(path))
+        except Exception as e:
+            print(f"[ERROR] Gagal ekstrak teks {path.name}: {e}")
+            continue
+
+        if not content or not content.strip():
+            print(f"[WARN] {path.name} tidak punya teks yang terbaca. Dilewati.")
+            continue
+
+        source = path.name
+        chunks = split_document(content)
+        item = {"source": source, "path": str(path), "questions": [], "done_chunks": []}
+
+        for idx, chunk in enumerate(chunks, start=1):
+            print(f"  - Chunk {idx}/{len(chunks)} ({len(chunk)} karakter)")
+            questions = generate_questions(chunk)
+            if questions:
+                item["questions"].extend(questions)
+                item["done_chunks"].append(idx - 1)
+                print(f"    -> {len(questions)} pertanyaan")
+                yield source, idx - 1, len(chunks), list(questions), dict(item), items
+            else:
+                print(f"    -> gagal, dilewati")
+
+        if item["questions"]:
+            items.append(item)
+            print(f"[OK] {source} -> {len(item['questions'])} pertanyaan")
+        else:
+            print(f"[WARN] {source} tidak menghasilkan pertanyaan.")
+
+        # Snapshot progres (semua file yang sudah selesai sejauh ini).
+        if items:
+            snapshot = build_result(items, {})
+            save_to_json(snapshot, output_file)
+            print(f"[OK] Snapshot sementara tersimpan: {output_file}")
+
+    if not items:
+        print("[ERROR] Tidak ada pertanyaan yang berhasil dihasilkan.")
+    print("[DONE] Streaming selesai.")
+
+
+def generate_questions_from_files(file_paths: list, output_file: str = None) -> dict:
+    """
+    Proses BANYAK file (.md/.txt/.pdf/.docx/.doc): ekstrak teks ->
+    chunk kecil -> pertanyaan per chunk.
+    Return dict berformat sama seperti hasil process_folder:
+    {"total_files", "total_questions", "questions", "failed_files", "files"}.
+    """
+    if output_file is None:
+        output_file = os.path.join(OUTPUT_DIR, "questions_upload.json")
+
+    items = []
+    for _source, _ci, _ct, _questions, item, items_so_far in iter_generate_questions_from_files(
+        file_paths, output_file=output_file
+    ):
+        if item["questions"] and item not in items:
+            items.append(item)
+
+    if not items:
+        return {}
+
+    result = build_result(items, {})
+    save_to_json(result, output_file)
+    total = sum(len(i["questions"]) for i in items)
+    print(f"[OK] {total} pertanyaan dari {len(items)} file selesai.")
+    print(f"[OK] Output: {output_file}")
+    return result
+
+
+def generate_questions_from_file(file_path: str, output_file: str = None) -> dict:
+    """Kompatibilitas: satu file -> pertanyaan (pakai multi-file)."""
+    return generate_questions_from_files([file_path], output_file)
+
+
 def main(folder_path: str = DEFAULT_FOLDER) -> list:
     """
     Jalankan seperti biasa: python modules/questions_generator.py
