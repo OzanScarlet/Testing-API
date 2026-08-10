@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -74,6 +75,7 @@ def load_recap() -> pd.DataFrame:
                     {
                         "Timestamp": rec.get("timestamp"),
                         "Pertanyaan": rec.get("question"),
+                        "Dokumen Acuan": rec.get("n_acuan"),
                         "Total": rec.get("total"),
                         "Label": rec.get("label"),
                         "Request ID": rec.get("request_id"),
@@ -100,9 +102,17 @@ def _next_unevaluated_index(questions, start):
     return i
 
 
+def _first_label(file_label):
+    """Dropdown multiselect bisa berupa list -> pakai label pertama."""
+    if isinstance(file_label, (list, tuple)):
+        return file_label[0] if file_label else None
+    return file_label
+
+
 def on_file_change(file_label, state: dict) -> tuple:
     """Pilih dokumen -> muat pertanyaan pertama yang belum dievaluasi."""
     state = dict(state) if state else {}
+    file_label = _first_label(file_label)
     idx = _file_index(file_label)
     state["file_label"] = file_label
     state["questions"] = FILES[idx]["questions"] if idx is not None else []
@@ -241,6 +251,15 @@ def _eval_with_retry(question: str, attempts: int = MAX_EVAL_ATTEMPTS):
     return "fail", last_err
 
 
+def _count_documents(retrieval_context: str) -> int:
+    """Jumlah dokumen acuan unik dari konteks retrieval penuh.
+    Format blok: '[1] Source: (...)' dst."""
+    if not retrieval_context:
+        return 0
+    indexes = re.findall(r"\[(\d+)\]\s*Source:", retrieval_context)
+    return len(set(int(i) for i in indexes))
+
+
 def _build_rec(question: str, out: dict) -> dict:
     result = out["result"]
     rec = {
@@ -249,6 +268,7 @@ def _build_rec(question: str, out: dict) -> dict:
         "request_id": out["request_id"],
         "answer": out["answer"],
         "retrieval_context_preview": (out["retrieval_context"] or "")[:2000],
+        "n_acuan": _count_documents(out.get("retrieval_context") or ""),
         "akurasi": result.get("akurasi"),
         "kelengkapan": result.get("kelengkapan"),
         "kesesuaian": result.get("kesesuaian"),
@@ -326,13 +346,23 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
     if files is None:
         files = FILES
 
-    start_idx = _file_index(start_label)
-    if start_idx is None:
-        start_idx = _file_index(state.get("file_label"))
-    if start_idx is None:
-        start_idx = 0
-    start_idx = max(0, min(start_idx, len(files) - 1))
+    if isinstance(start_label, (list, tuple)):
+        labels = list(start_label)
+    elif start_label:
+        labels = [start_label]
+    else:
+        labels = [state.get("file_label")]
+    labels = [l for l in labels if l]
 
+    if labels:
+        indexes = sorted({_file_index(l) for l in labels if _file_index(l) is not None})
+        if not indexes:
+            indexes = [0]
+    else:
+        indexes = list(range(len(files)))
+    indexes = [max(0, min(i, len(files) - 1)) for i in indexes]
+
+    start_idx = indexes[0]
     dd_out = gr.update() if not sync_dropdown else _file_label(start_idx, files)
 
     empty_df = _empty_judge_df()
@@ -348,13 +378,13 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
 
     total_tasks = sum(
         1
-        for fi in range(start_idx, len(files))
+        for fi in indexes
         for q in files[fi]["questions"]
         if q not in DONE
     )
     processed = 0
 
-    for fi in range(start_idx, len(files)):
+    for fi in indexes:
         f = files[fi]
         qs = f["questions"]
         label = _file_label(fi, files)
@@ -792,6 +822,7 @@ def main():
                         file_dd = gr.Dropdown(
                             label="Pilih Dokumen",
                             choices=[_file_label(i) for i in range(len(FILES))],
+                            multiselect=True,
                             scale=1,
                             min_width=180,
                         )
@@ -992,6 +1023,7 @@ def main():
                     headers=[
                         "Timestamp",
                         "Pertanyaan",
+                        "Dokumen Acuan",
                         "Total",
                         "Label",
                         "Request ID",
