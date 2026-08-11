@@ -51,17 +51,21 @@ def get_answer(question: str) -> tuple:
     return answer, request_id
 
 
-def judge_answer(question: str, fastapi_answer: str, retrieval_context: str) -> dict:
-    """Nilai jawaban FastAPI dengan 3 kriteria, memakai konteks retrieval
-    dari trace Phoenix sebagai acuan (dokumen yang diretriev sistem)."""
+def judge_answer(question: str, fastapi_answer: str, retrieval_context: str, domain: str = "kelapa sawit") -> dict:
+    """Nilai jawaban dengan 3 kriteria, memakai konteks retrieval sebagai acuan.
+
+    domain: topik/tema dokumen, dipakai di system prompt evaluator
+    (default 'kelapa sawit' untuk tab Evaluasi; Chat Dokumen mengirim
+    domain berbeda, mis. 'dokumen yang diupload')."""
     system_prompt = (
-        "Kamu adalah evaluator kualitas jawaban chatbot RAG kelapa sawit. "
-        "Nilai jawaban yang ditampilkan ke user (dari FastAPI) dengan acuan "
-        "KONTEKS DOKUMEN HASIL RETRIEVAL dari tracing (dari Phoenix). "
+        "Kamu adalah evaluator kualitas jawaban chatbot RAG. "
+        "Nilai jawaban yang ditampilkan ke user dengan acuan "
+        "KONTEKS DOKUMEN HASIL RETRIEVAL. "
         "Konteks retrieval adalah kumpulan potongan dokumen yang diambil sistem "
         "untuk menjawab pertanyaan. Periksa apakah setiap klaim di jawaban "
         "didukung oleh isi konteks retrieval, dan deteksi halusinasi (klaim yang "
         "tidak ada atau bertentangan dengan konteks).\n"
+        f"Topik/tema dokumen yang dinilai: {domain}.\n"
         "Nilai berdasarkan tiga kriteria:\n"
         "1. Akurasi pertanyaan dan jawaban: seberapa tepat dan benar jawaban "
         "menjawab pertanyaan, tanpa kesalahan faktual.\n"
@@ -84,8 +88,8 @@ def judge_answer(question: str, fastapi_answer: str, retrieval_context: str) -> 
     )
     user_prompt = (
         f"Pertanyaan:\n{question}\n\n"
-        f"Jawaban yang ditampilkan ke user (FastAPI):\n{fastapi_answer}\n\n"
-        f"Acuan (konteks retrieval dari trace Phoenix):\n{retrieval_context or '(tidak ada konteks retrieval)'}"
+        f"Jawaban yang ditampilkan ke user:\n{fastapi_answer}\n\n"
+        f"Acuan (konteks retrieval):\n{retrieval_context or '(tidak ada konteks retrieval)'}"
     )
 
     client = get_client()

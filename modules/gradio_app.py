@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from modules.judge import get_answer, judge_answer
 from modules.phoenix_extractor import get_retrieval_context
 from modules.questions_generator import iter_generate_questions_from_files
+from modules.doc_chat import ask as doc_ask
+from modules.doc_chat import index_documents as doc_index
 
 load_dotenv()
 
@@ -48,6 +50,8 @@ def load_done():
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if rec.get("type") == "chat_doc":
+                continue
             if rec.get("question") and rec.get("total") is not None and not rec.get("error"):
                 DONE.add(rec["question"])
 
@@ -73,6 +77,7 @@ def load_recap() -> pd.DataFrame:
                     continue
                 rows.append(
                     {
+                        "Tipe": "Chat Dokumen" if rec.get("type") == "chat_doc" else "Evaluasi",
                         "Timestamp": rec.get("timestamp"),
                         "Pertanyaan": rec.get("question"),
                         "Dokumen Acuan": rec.get("n_acuan"),
@@ -146,7 +151,7 @@ def advance_sequence(state: dict) -> tuple:
 
 def clear_all():
     empty_df = pd.DataFrame(columns=["Kriteria", "Skor", "Alasan"])
-    return "", "", empty_df, None, ""
+    return [], "", empty_df, None, ""
 
 
 def _judge_dataframe(result) -> pd.DataFrame:
@@ -279,13 +284,23 @@ def _build_rec(question: str, out: dict) -> dict:
     return rec
 
 
-def _build_outputs(out: dict) -> tuple:
-    fastapi_text = f"Jawaban (FastAPI):\n{out['answer']}\n"
-    trace_text = f"Konteks retrieval (trace):\n{out['retrieval_context']}"
+def _qa_messages(question, answer):
+    """Pertanyaan+jawaban jadi pesan chat (format Gradio 6 Chatbot)."""
+    if not answer:
+        return []
+    return [
+        {"role": "user", "content": question or ""},
+        {"role": "assistant", "content": answer},
+    ]
+
+
+def _build_outputs(out: dict, question: str = "") -> tuple:
+    qa_msgs = _qa_messages(question, out.get("answer"))
+    trace_text = f"Konteks retrieval (trace):\n{out.get('retrieval_context')}"
     judge_df = _judge_dataframe(out["result"])
     judge_plot = _judge_plot_df(out["result"])
     judge_summary = _judge_summary(out["result"])
-    return fastapi_text, trace_text, judge_df, judge_plot, judge_summary
+    return qa_msgs, trace_text, judge_df, judge_plot, judge_summary
 
 
 def run_eval(manual: str, state: dict) -> tuple:
@@ -295,7 +310,7 @@ def run_eval(manual: str, state: dict) -> tuple:
     question = (manual or "").strip() or (state or {}).get("question", "").strip()
     if not question:
         base = {"question": ""}
-        return "Pertanyaan kosong.", "", _empty_judge_df(), None, "", "", base
+        return [], "", _empty_judge_df(), None, "Pertanyaan kosong.", "", base
 
     base = dict(state) if state else {}
     base["question"] = question
@@ -306,13 +321,13 @@ def run_eval(manual: str, state: dict) -> tuple:
             f"Evaluasi gagal setelah {MAX_EVAL_ATTEMPTS} percobaan: {payload}\n"
             "Pertanyaan TIDAK dianggap selesai — silakan coba lagi."
         )
-        return msg, "", _empty_judge_df(), None, f"**Gagal:** {payload}", question, base
+        return [], "", _empty_judge_df(), None, f"**Gagal:** {payload}", question, base
 
     out = payload
     save_eval(_build_rec(question, out))
     DONE.add(question)
 
-    fastapi_text, trace_text, judge_df, judge_plot, judge_summary = _build_outputs(out)
+    fastapi_text, trace_text, judge_df, judge_plot, judge_summary = _build_outputs(out, question)
 
     nxt = question
     base.update(
@@ -368,11 +383,11 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
     empty_df = _empty_judge_df()
     done_count = 0
     failed_count = 0
-    fastapi_text, trace_text = "", ""
+    fastapi_msgs, trace_text = [], ""
     judge_df, judge_plot = empty_df, None
     judge_summary = ""
     label = _file_label(start_idx, files)
-    last_ui = ("", "", empty_df, None, "", "", dd_out, dict(state),
+    last_ui = ([], "", empty_df, None, "", "", dd_out, dict(state),
                f"Memulai auto evaluasi dari {_file_label(start_idx, files)} ...")
     yield last_ui
 
@@ -409,14 +424,14 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
                 save_eval(_build_rec(question, out))
                 DONE.add(question)
                 done_count += 1
-                fastapi_text, trace_text, judge_df, judge_plot, judge_summary = _build_outputs(out)
+                fastapi_msgs, trace_text, judge_df, judge_plot, judge_summary = _build_outputs(out, question)
                 status_msg = (
                     f"Soal {qi + 1}/{len(qs)} berhasil dinilai — {label}.\n"
                     f"Soal selesai: {done_count}. Lanjut ke berikutnya..."
                 )
             else:
                 failed_count += 1
-                fastapi_text, trace_text, judge_df, judge_plot = "", "", empty_df, None
+                fastapi_msgs, trace_text, judge_df, judge_plot = [], "", empty_df, None
                 judge_summary = f"**Gagal dinilai:** {payload}"
                 status_msg = (
                     f"Soal gagal dinilai setelah {AUTO_MAX_ATTEMPTS} percobaan.\n"
@@ -427,7 +442,7 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
                 )
                 state["question"] = question
                 yield (
-                    fastapi_text,
+                    fastapi_msgs,
                     trace_text,
                     judge_df,
                     judge_plot,
@@ -442,7 +457,7 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
             state["question"] = question
             state["q_index"] = qi
             yield (
-                fastapi_text,
+                fastapi_msgs,
                 trace_text,
                 judge_df,
                 judge_plot,
@@ -459,7 +474,7 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
         f"- Soal gagal: {failed_count}"
     )
     last_ui = (
-        fastapi_text,
+        fastapi_msgs,
         trace_text,
         judge_df,
         judge_plot,
@@ -573,7 +588,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
     file_paths = _resolve_uploaded_paths(uploaded)
     if not file_paths:
         yield (
-            "",
+            [],
             "",
             empty_df,
             None,
@@ -586,7 +601,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
 
     names = ",\n".join(Path(p).name for p in file_paths)
     yield (
-        "",
+        [],
         "",
         empty_df,
         None,
@@ -600,7 +615,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
     failed_count = 0
     total_questions = 0
     total_files = 0
-    last_fastapi, last_trace = "", ""
+    last_fastapi, last_trace = [], ""
     last_df, last_plot, last_summary = empty_df, None, ""
 
     try:
@@ -621,7 +636,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
                 qinfo = f"({chunk_display}) — `{source}`"
 
                 yield (
-                    "",
+                    [],
                     "",
                     empty_df,
                     None,
@@ -653,7 +668,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
                     )
                     return
                 answer, request_id = payload
-                fastapi_text = f"Jawaban (FastAPI):\n{answer}\n"
+                fastapi_text = _qa_messages(question, answer)
 
                 yield (
                     fastapi_text,
@@ -737,7 +752,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
                 DONE.add(question)
                 done_count += 1
                 last_fastapi, last_trace, last_df, last_plot, last_summary = (
-                    _build_outputs(out)
+                    _build_outputs(out, question)
                 )
                 status_msg = (
                     f"Soal {done_count} berhasil dinilai ({qpos}) {qinfo}\n"
@@ -805,6 +820,178 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
         return
 
 
+_INDEXED_SIG = None
+
+
+def _chat_signature(paths):
+    sig = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+            sig.append((p, st.st_size, st.st_mtime))
+        except OSError:
+            sig.append((p, 0, 0))
+    return tuple(sorted(sig))
+
+
+def _chat_ensure_indexed(uploaded):
+    """Index dokumen hanya jika set file berubah. Return (paths, status_msg)."""
+    global _INDEXED_SIG
+    paths = _resolve_uploaded_paths(uploaded)
+    if not paths:
+        return [], "Belum ada dokumen yang diupload. Upload file dulu."
+    sig = _chat_signature(paths)
+    if sig == _INDEXED_SIG:
+        return paths, ""
+    n = doc_index(paths)
+    if n == 0:
+        return [], "Tidak ada chunk yang bisa diindeks dari file tersebut."
+    _INDEXED_SIG = sig
+    return paths, f"{n} chunk diindeks dari {len(paths)} file."
+
+
+def _messages_to_pairs(history):
+    """Konversi list dict messages (format Gradio 6) -> list [user, assistant]."""
+    pairs = []
+    pending = None
+    for m in history or []:
+        if isinstance(m, dict):
+            role = m.get("role")
+            content = m.get("content", "")
+        elif isinstance(m, (list, tuple)) and len(m) >= 1:
+            role = "user"
+            content = m[0]
+        else:
+            continue
+        if role == "user":
+            if pending is not None:
+                pairs.append([pending, ""])
+            pending = content
+        else:
+            pairs.append([pending if pending is not None else "", content])
+            pending = None
+    if pending is not None:
+        pairs.append([pending, ""])
+    return pairs
+
+
+def _pairs_to_messages(pairs):
+    """Konversi list [user, assistant] -> list dict {role, content}."""
+    out = []
+    for user, assistant in pairs or []:
+        out.append({"role": "user", "content": user})
+        out.append({"role": "assistant", "content": assistant})
+    return out
+
+
+def _chat_format_sources(hits):
+    if not hits:
+        return "(tidak ada sumber — dijawab dari pengetahuan umum)"
+    lines = []
+    for i, h in enumerate(hits):
+        snippet = h["text"].replace("\n", " ").strip()[:180]
+        lines.append(f"**[{i + 1}] {h['source']}** (skor {h['score']})\n{snippet}")
+    return "\n\n".join(lines)
+
+
+def chat_index(uploaded):
+    paths, msg = _chat_ensure_indexed(uploaded)
+    return msg
+
+
+def _chat_context(hits):
+    """Format hits retrieval lokal -> string konteks [1]..[n] untuk judge."""
+    if not hits:
+        return None
+    return "\n\n".join(
+        f"[{i + 1}] Sumber: {h['source']} (skor {h['score']})\n{h['text']}"
+        for i, h in enumerate(hits)
+    )
+
+
+def _chat_judge_retry(question, answer, context, attempts):
+    """Judge jawaban chat dengan retry. Return ('ok', result) / ('fail', None)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            result = judge_answer(question, answer, context, domain="dokumen yang diupload")
+            if result and "error" not in result:
+                return "ok", result
+        except Exception as e:
+            print(f"[CHAT-JUDGE] percobaan {attempt}/{attempts}: {e}")
+        time.sleep(RETRY_DELAY)
+    return "fail", None
+
+
+def _chat_judge_df(result):
+    empty = pd.DataFrame(columns=["Kriteria", "Skor", "Alasan"])
+    if not result or "error" in result:
+        return empty
+    rows = []
+    for key, label in (
+        ("akurasi", "Akurasi"),
+        ("kelengkapan", "Kelengkapan"),
+        ("kesesuaian", "Kesesuaian"),
+    ):
+        item = result.get(key, {})
+        rows.append([label, item.get("skor"), item.get("alasan")])
+    rows.append(["Total", result.get("total"), result.get("label")])
+    return pd.DataFrame(rows, columns=["Kriteria", "Skor", "Alasan"])
+
+
+def _save_chat_eval(question, answer, hits, result):
+    rec = {
+        "type": "chat_doc",
+        "timestamp": datetime.now().isoformat(),
+        "question": question,
+        "answer": answer,
+        "n_acuan": len(hits) if hits else 0,
+        "sumber": ", ".join(h["source"] for h in hits) if hits else "",
+        "akurasi": result.get("akurasi", {}).get("skor"),
+        "kelengkapan": result.get("kelengkapan", {}).get("skor"),
+        "kesesuaian": result.get("kesesuaian", {}).get("skor"),
+        "total": result.get("total"),
+        "label": result.get("label"),
+        "kesimpulan": result.get("kesimpulan"),
+        "request_id": "",
+    }
+    save_eval(rec)
+
+
+def chat_answer(message, history, uploaded):
+    pairs = _messages_to_pairs(history)
+    empty_df = _empty_judge_df()
+    if not message or not message.strip():
+        return _pairs_to_messages(pairs), "", empty_df, ""
+    paths, status = _chat_ensure_indexed(uploaded)
+    try:
+        answer, hits = doc_ask(message.strip(), pairs)
+    except Exception as e:
+        pairs.append([message, f"Gagal menjawab: {e}"])
+        return _pairs_to_messages(pairs), "", empty_df, status
+    pairs.append([message, answer])
+
+    context = _chat_context(hits)
+    if context:
+        judge_status, judge_result = _chat_judge_retry(
+            message.strip(), answer, context, attempts=3
+        )
+        if judge_status == "ok":
+            judge_df = _chat_judge_df(judge_result)
+            try:
+                _save_chat_eval(message.strip(), answer, hits, judge_result)
+            except Exception as e:
+                print(f"[CHAT-JUDGE] gagal simpan rekap: {e}")
+        else:
+            judge_df = empty_df
+    else:
+        judge_df = empty_df
+    return _pairs_to_messages(pairs), _chat_format_sources(hits), judge_df, status
+
+
+def chat_reset():
+    return [], "", _empty_judge_df(), "Chat dibersihkan."
+
+
 def main():
     if not os.getenv("CHATOPA_URL") or not os.getenv("CHATOPA_API_KEY"):
         print("Konfigurasi CHATOPA_URL / CHATOPA_API_KEY belum lengkap di .env.")
@@ -857,10 +1044,9 @@ def main():
 
                 with gr.Row():
                     with gr.Column():
-                        fastapi_out = gr.Textbox(
-                            label="Jawaban FastAPI (Chatbot)",
-                            lines=14,
-                            interactive=False,
+                        fastapi_out = gr.Chatbot(
+                            label="Percakapan (Pertanyaan → Jawaban)",
+                            height=420,
                         )
                     with gr.Column():
                         trace_out = gr.Textbox(
@@ -869,21 +1055,22 @@ def main():
                             interactive=False,
                         )
 
-                with gr.Row():
-                    with gr.Column():
-                        judge_table = gr.Dataframe(
-                            headers=["Kriteria", "Skor", "Alasan"],
-                            label="Hasil Judge",
-                            interactive=False,
-                        )
-                    with gr.Column():
-                        judge_plot = gr.BarPlot(
-                            x="Kriteria",
-                            y="Skor",
-                            title="Skor per Kriteria",
-                            height=220,
-                        )
-                        judge_summary = gr.Markdown()
+                with gr.Group():
+                    with gr.Row():
+                        with gr.Column():
+                            judge_table = gr.Dataframe(
+                                headers=["Kriteria", "Skor", "Alasan"],
+                                label="Hasil Judge",
+                                interactive=False,
+                            )
+                        with gr.Column():
+                            judge_plot = gr.BarPlot(
+                                x="Kriteria",
+                                y="Skor",
+                                title="Skor per Kriteria",
+                                height=220,
+                            )
+                            judge_summary = gr.Markdown()
 
                 auto_status = gr.Markdown()
 
@@ -962,10 +1149,9 @@ def main():
 
                 with gr.Row():
                     with gr.Column():
-                        up_fastapi = gr.Textbox(
-                            label="Jawaban FastAPI (Chatbot)",
-                            lines=14,
-                            interactive=False,
+                        up_fastapi = gr.Chatbot(
+                            label="Percakapan (Pertanyaan → Jawaban)",
+                            height=420,
                         )
                     with gr.Column():
                         up_trace = gr.Textbox(
@@ -974,21 +1160,22 @@ def main():
                             interactive=False,
                         )
 
-                with gr.Row():
-                    with gr.Column():
-                        up_table = gr.Dataframe(
-                            headers=["Kriteria", "Skor", "Alasan"],
-                            label="Hasil Judge",
-                            interactive=False,
-                        )
-                    with gr.Column():
-                        up_plot = gr.BarPlot(
-                            x="Kriteria",
-                            y="Skor",
-                            title="Skor per Kriteria",
-                            height=220,
-                        )
-                        up_summary = gr.Markdown()
+                with gr.Group():
+                    with gr.Row():
+                        with gr.Column():
+                            up_table = gr.Dataframe(
+                                headers=["Kriteria", "Skor", "Alasan"],
+                                label="Hasil Judge",
+                                interactive=False,
+                            )
+                        with gr.Column():
+                            up_plot = gr.BarPlot(
+                                x="Kriteria",
+                                y="Skor",
+                                title="Skor per Kriteria",
+                                height=220,
+                            )
+                            up_summary = gr.Markdown()
 
                 up_q = gr.Textbox(
                     label="Pertanyaan",
@@ -1012,15 +1199,70 @@ def main():
                     ],
                 )
                 up_stop_btn.click(
-                    fn=lambda: "⏹ Proses dihentikan.",
+                    fn=lambda: "Proses dihentikan.",
                     inputs=[],
                     outputs=[up_status],
                     cancels=[pipeline_event],
                 )
 
+            with gr.Tab("Chat Dokumen"):
+                with gr.Group():
+                    chat_upload = gr.File(
+                        label="Upload dokumen (md, txt, pdf, docx, doc) — langsung dipelajari otomatis",
+                        file_count="multiple",
+                        file_types=[".md", ".txt", ".pdf", ".docx", ".doc"],
+                        scale=1,
+                        min_width=240,
+                    )
+                    chat_index_status = gr.Markdown()
+
+                chatbot = gr.Chatbot(label="Chat", height=420, layout="bubble")
+                with gr.Row():
+                    chat_in = gr.Textbox(
+                        label="Upload dokumen, lalu tulis pertanyaan di sini",
+                        placeholder="Contoh: apa isi utama dokumen ini?",
+                        lines=2,
+                        scale=3,
+                        min_width=240,
+                    )
+                    chat_send = gr.Button(
+                        "Kirim", variant="primary", scale=1, min_width=120
+                    )
+                    chat_reset_btn = gr.Button(
+                        "Reset", variant="stop", scale=1, min_width=120
+                    )
+                with gr.Row():
+                    with gr.Group():
+                        chat_sources = gr.Markdown(label="Sumber")
+                    with gr.Group():
+                        chat_judge = gr.Dataframe(
+                            headers=["Kriteria", "Skor", "Alasan"],
+                            label="Penilaian",
+                            interactive=False,
+                        )
+
+                chat_upload.change(
+                    chat_index, inputs=[chat_upload], outputs=[chat_index_status]
+                )
+
+                chat_send.click(
+                    chat_answer,
+                    inputs=[chat_in, chatbot, chat_upload],
+                    outputs=[chatbot, chat_sources, chat_judge, chat_index_status],
+                )
+                chat_in.submit(
+                    chat_answer,
+                    inputs=[chat_in, chatbot, chat_upload],
+                    outputs=[chatbot, chat_sources, chat_judge, chat_index_status],
+                )
+                chat_reset_btn.click(
+                    chat_reset, inputs=[], outputs=[chatbot, chat_sources, chat_judge, chat_index_status]
+                )
+
             with gr.Tab("Rekapitulasi Batch"):
                 recap_table = gr.Dataframe(
                     headers=[
+                        "Tipe",
                         "Timestamp",
                         "Pertanyaan",
                         "Dokumen Acuan",
@@ -1036,7 +1278,24 @@ def main():
                     load_recap, inputs=[], outputs=[recap_table]
                 )
 
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    _CSS = """
+/* Tombol oval */
+button { border-radius: 999px !important; padding: 8px 24px !important; }
+/* Card lembut */
+.gr-group { padding: 14px !important; border-radius: 18px !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important; }
+input, textarea, select { border-radius: 12px !important; }
+/* Chat bubble user -> kanan biru muda, bot -> kiri putih */
+.bubble.user-row { background-color: var(--primary-100) !important; }
+.bubble.bot-row { background-color: var(--color-neutral-50) !important; }
+"""
+
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        theme=gr.themes.Soft(),
+        css=_CSS,
+    )
 
 
 if __name__ == "__main__":
