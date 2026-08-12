@@ -28,6 +28,8 @@ EVAL_PATH = ROOT / "output" / "evaluations.jsonl"
 FILES = []
 DONE = set()
 
+SKIP_JUDGE = False  # Judge aktif (mode normal): POST -> GET -> judge.
+
 
 def load_files():
     global FILES
@@ -222,13 +224,16 @@ def _try_full_eval(question: str):
     if not retrieval_context:
         return {"error": "Konteks retrieval tidak ditemukan."}
 
-    try:
-        result = judge_answer(question, answer, retrieval_context)
-    except Exception as e:
-        print(f"[JUDGE] error: {e}")
-        return {"error": f"Judge gagal: {e}"}
-    if not result or "error" in result:
-        return result or {"error": "Judge tidak mengembalikan hasil."}
+    if SKIP_JUDGE:
+        result = _skip_judge_result(question, retrieval_context)
+    else:
+        try:
+            result = judge_answer(question, answer, retrieval_context)
+        except Exception as e:
+            print(f"[JUDGE] error: {e}")
+            return {"error": f"Judge gagal: {e}"}
+        if not result or "error" in result:
+            return result or {"error": "Judge tidak mengembalikan hasil."}
 
     return {
         "answer": answer,
@@ -284,6 +289,27 @@ def _build_rec(question: str, out: dict) -> dict:
     return rec
 
 
+def _skip_judge_result(question: str, context):
+    """Stub hasil saat SKIP_JUDGE aktif: judge tidak dipanggil,
+    tapi UI tetap mendapat dict bertanda 'skipped' untuk disembunyikan."""
+    return {
+        "skipped": True,
+        "akurasi": {"skor": None, "alasan": "Judge dilewati (mode uji CSS)."},
+        "kelengkapan": {"skor": None, "alasan": "Judge dilewati (mode uji CSS)."},
+        "kesesuaian": {"skor": None, "alasan": "Judge dilewati (mode uji CSS)."},
+        "total": None,
+        "label": "SKIP",
+        "kesimpulan": (
+            "Judge dinonaktifkan — hanya menampilkan jawaban POST & "
+            "konteks retrieval untuk uji tampilan CSS."
+        ),
+    }
+
+
+def _is_skipped(out: dict) -> bool:
+    return bool((out.get("result") or {}).get("skipped"))
+
+
 def _qa_messages(question, answer):
     """Pertanyaan+jawaban jadi pesan chat (format Gradio 6 Chatbot)."""
     if not answer:
@@ -294,16 +320,28 @@ def _qa_messages(question, answer):
     ]
 
 
-def _trace_msgs(text: str) -> str:
-    """Konteks retrieval jadi teks polos (Textbox) untuk ditampilkan
-    konsisten dengan tema."""
-    return text if text else ""
+def _clean_retrieval(context: str) -> str:
+    """Bersihkan metadata header: Knowledge Context, baris '[N] Source:'
+    dan label 'Content:' — sisakan isi dokumen (blok sitasi tetap)."""
+    if not context:
+        return context
+    c = re.sub(r"^\s*-\s*Knowledge Context:\s*\n?", "", context)
+    c = re.sub(r"^\s*\[\d+\]\s*Source:[^\n]*\n?", "", c, flags=re.M)
+    c = re.sub(r"^\s*Content:\s*\n?", "", c, flags=re.M)
+    return c.strip()
+
+
+def _trace_msgs(text: str) -> list:
+    """Konteks retrieval jadi pesan Chatbot (format Gradio 6)."""
+    if not text:
+        return []
+    return [{"role": "assistant", "content": text}]
 
 
 def _build_outputs(out: dict, question: str = "") -> tuple:
     qa_msgs = _qa_messages(question, out.get("answer"))
     trace_text = _trace_msgs(
-        f"Konteks retrieval (trace):\n{out.get('retrieval_context')}"
+        f"Konteks retrieval (trace):\n{_clean_retrieval(out.get('retrieval_context') or '')}"
     )
     judge_df = _judge_dataframe(out["result"])
     judge_plot = _judge_plot_df(out["result"])
@@ -332,8 +370,9 @@ def run_eval(manual: str, state: dict) -> tuple:
         return [], [], _empty_judge_df(), None, f"**Gagal:** {payload}", question, base
 
     out = payload
-    save_eval(_build_rec(question, out))
-    DONE.add(question)
+    if not _is_skipped(out):
+        save_eval(_build_rec(question, out))
+        DONE.add(question)
 
     fastapi_text, trace_text, judge_df, judge_plot, judge_summary = _build_outputs(out, question)
 
@@ -391,7 +430,7 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
     empty_df = _empty_judge_df()
     done_count = 0
     failed_count = 0
-    fastapi_msgs, trace_text = [], ""
+    fastapi_msgs, trace_text = [], []
     judge_df, judge_plot = empty_df, None
     judge_summary = ""
     label = _file_label(start_idx, files)
@@ -429,8 +468,9 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
 
             if status == "ok":
                 out = payload
-                save_eval(_build_rec(question, out))
-                DONE.add(question)
+                if not _is_skipped(out):
+                    save_eval(_build_rec(question, out))
+                    DONE.add(question)
                 done_count += 1
                 fastapi_msgs, trace_text, judge_df, judge_plot, judge_summary = _build_outputs(out, question)
                 status_msg = (
@@ -439,7 +479,7 @@ def auto_eval_all(start_label, state: dict, progress=gr.Progress(), files=None,
                 )
             else:
                 failed_count += 1
-                fastapi_msgs, trace_text, judge_df, judge_plot = [], "", empty_df, None
+                fastapi_msgs, trace_text, judge_df, judge_plot = [], [], empty_df, None
                 judge_summary = f"**Gagal dinilai:** {payload}"
                 status_msg = (
                     f"Soal gagal dinilai setelah {AUTO_MAX_ATTEMPTS} percobaan.\n"
@@ -549,6 +589,8 @@ def _trace_retry(request_id, question, attempts):
 def _judge_retry(question, answer, retrieval_context, attempts):
     """Retry judge sampai hasil keluar.
     Return ("ok", result_dict) atau ("fail", last_err)."""
+    if SKIP_JUDGE:
+        return "ok", _skip_judge_result(question, retrieval_context)
     last_err = None
     for attempt in range(1, attempts + 1):
         print(f"[JUDGE] percobaan {attempt}/{attempts}: {question[:60]}")
@@ -623,7 +665,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
     failed_count = 0
     total_questions = 0
     total_files = 0
-    last_fastapi, last_trace = [], ""
+    last_fastapi, last_trace = [], []
     last_df, last_plot, last_summary = empty_df, None, ""
 
     try:
@@ -713,7 +755,7 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
                     )
                     return
                 retrieval_context = payload
-                trace_text = f"Konteks retrieval (trace):\n{retrieval_context}"
+                trace_text = _trace_msgs(f"Konteks retrieval (trace):\n{_clean_retrieval(retrieval_context)}")
 
                 yield (
                     fastapi_text,
@@ -756,8 +798,9 @@ def upload_pipeline(uploaded, state: dict, progress=gr.Progress()):
                     "retrieval_context": retrieval_context,
                     "result": payload,
                 }
-                save_eval(_build_rec(question, out))
-                DONE.add(question)
+                if not _is_skipped(out):
+                    save_eval(_build_rec(question, out))
+                    DONE.add(question)
                 done_count += 1
                 last_fastapi, last_trace, last_df, last_plot, last_summary = (
                     _build_outputs(out, question)
@@ -919,6 +962,8 @@ def _chat_context(hits):
 
 def _chat_judge_retry(question, answer, context, attempts):
     """Judge jawaban chat dengan retry. Return ('ok', result) / ('fail', pesan_error)."""
+    if SKIP_JUDGE:
+        return "ok", _skip_judge_result(question, context)
     last_err = ""
     for attempt in range(1, attempts + 1):
         try:
@@ -997,7 +1042,8 @@ def chat_answer(message, history, uploaded):
         if judge_status == "ok":
             judge_df = _chat_judge_df(judge_result)
             try:
-                _save_chat_eval(message.strip(), answer, hits, judge_result)
+                if not judge_result.get("skipped"):
+                    _save_chat_eval(message.strip(), answer, hits, judge_result)
             except Exception as e:
                 print(f"[CHAT-JUDGE] gagal simpan rekap: {e}")
         else:
@@ -1073,9 +1119,9 @@ def main():
                             elem_classes=["soft-box"],
                         )
                     with gr.Column():   
-                        trace_out = gr.Textbox(
+                        trace_out = gr.Chatbot(
                             label="Konteks Retrieval (Phoenix)",
-                            lines=14,
+                            height=420,
                             elem_classes=["soft-box"],
                         )
 
@@ -1185,10 +1231,9 @@ def main():
                             elem_classes=["soft-box"],
                         )
                     with gr.Column():
-                        up_trace = gr.Textbox(
+                        up_trace = gr.Chatbot(
                             label="Konteks Retrieval (Phoenix)",
-                            lines=14,
-                            interactive=False,
+                            height=420,
                             elem_classes=["soft-box"],
                         )
 
