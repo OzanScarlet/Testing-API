@@ -4,6 +4,9 @@ __pycache__/
 # Hasil evaluasi (terus bertambah per evaluasi)
 output/evaluations.jsonl
 output/evaluations.csv
+# Qdrant lokal (Chat Dokumen) & cache model embedding
+output/qdrant_db/
+output/.fastembed/
 *.py[codz]
 *$py.class
 

@@ -1,0 +1,38 @@
+{
+  "total_files": 1,
+  "total_questions": 10,
+  "questions": [
+    "Pohon kelapa sawit termasuk tanaman dari genus apa?",
+    "Kelapa sawit berperan sebagai sumber utama apa di dunia?",
+    "Sebutkan dua spesies kelapa sawit yang paling dikenal.",
+    "Dari mana asal Elaeis guineensis?",
+    "Dari mana asal Elaeis oleifera?",
+    "Spesies kelapa sawit mana yang paling luas dibudidayakan secara komersial?",
+    "Mengapa Elaeis guineensis paling luas dibudidayakan?",
+    "Elaeis oleifera berasal dari kawasan mana?",
+    "Apa nama ilmiah kelapa sawit yang berasal dari Afrika Barat?",
+    "Apa nama ilmiah kelapa sawit yang berasal dari Amerika Tengah dan Selatan?"
+  ],
+  "failed_files": [],
+  "files": [
+    {
+      "source": "tes sawit.docx",
+      "path": "C:\\Users\\Acer\\AppData\\Local\\Temp\\gradio\\d76a27e570d602c194992c1e2ca30928dc7e433f0ab015438b1572d0c11a3375\\tes sawit.docx",
+      "questions": [
+        "Pohon kelapa sawit termasuk tanaman dari genus apa?",
+        "Kelapa sawit berperan sebagai sumber utama apa di dunia?",
+        "Sebutkan dua spesies kelapa sawit yang paling dikenal.",
+        "Dari mana asal Elaeis guineensis?",
+        "Dari mana asal Elaeis oleifera?",
+        "Spesies kelapa sawit mana yang paling luas dibudidayakan secara komersial?",
+        "Mengapa Elaeis guineensis paling luas dibudidayakan?",
+        "Elaeis oleifera berasal dari kawasan mana?",
+        "Apa nama ilmiah kelapa sawit yang berasal dari Afrika Barat?",
+        "Apa nama ilmiah kelapa sawit yang berasal dari Amerika Tengah dan Selatan?"
+      ],
+      "done_chunks": [
+        0
+      ]
+    }
+  ]
+}

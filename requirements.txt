@@ -5,3 +5,7 @@ arize-phoenix-client
 gradio
 pypdf
 python-docx
+qdrant-client
+fastembed
+arize-phoenix-otel
+openinference-instrumentation-openai
