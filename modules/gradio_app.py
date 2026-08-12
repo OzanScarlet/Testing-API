@@ -151,7 +151,7 @@ def advance_sequence(state: dict) -> tuple:
 
 def clear_all():
     empty_df = pd.DataFrame(columns=["Kriteria", "Skor", "Alasan"])
-    return [], "", empty_df, None, ""
+    return [], [], empty_df, None, ""
 
 
 def _judge_dataframe(result) -> pd.DataFrame:
@@ -294,9 +294,17 @@ def _qa_messages(question, answer):
     ]
 
 
+def _trace_msgs(text: str) -> str:
+    """Konteks retrieval jadi teks polos (Textbox) untuk ditampilkan
+    konsisten dengan tema."""
+    return text if text else ""
+
+
 def _build_outputs(out: dict, question: str = "") -> tuple:
     qa_msgs = _qa_messages(question, out.get("answer"))
-    trace_text = f"Konteks retrieval (trace):\n{out.get('retrieval_context')}"
+    trace_text = _trace_msgs(
+        f"Konteks retrieval (trace):\n{out.get('retrieval_context')}"
+    )
     judge_df = _judge_dataframe(out["result"])
     judge_plot = _judge_plot_df(out["result"])
     judge_summary = _judge_summary(out["result"])
@@ -310,7 +318,7 @@ def run_eval(manual: str, state: dict) -> tuple:
     question = (manual or "").strip() or (state or {}).get("question", "").strip()
     if not question:
         base = {"question": ""}
-        return [], "", _empty_judge_df(), None, "Pertanyaan kosong.", "", base
+        return [], [], _empty_judge_df(), None, "Pertanyaan kosong.", "", base
 
     base = dict(state) if state else {}
     base["question"] = question
@@ -321,7 +329,7 @@ def run_eval(manual: str, state: dict) -> tuple:
             f"Evaluasi gagal setelah {MAX_EVAL_ATTEMPTS} percobaan: {payload}\n"
             "Pertanyaan TIDAK dianggap selesai — silakan coba lagi."
         )
-        return [], "", _empty_judge_df(), None, f"**Gagal:** {payload}", question, base
+        return [], [], _empty_judge_df(), None, f"**Gagal:** {payload}", question, base
 
     out = payload
     save_eval(_build_rec(question, out))
@@ -1068,7 +1076,6 @@ def main():
                         trace_out = gr.Textbox(
                             label="Konteks Retrieval (Phoenix)",
                             lines=14,
-                            interactive=False,
                             elem_classes=["soft-box"],
                         )
 
@@ -1310,7 +1317,7 @@ def main():
                     show_label=True,
                     elem_classes=["recap-table"],
                     interactive=False,
-                    wrap=False,
+                    wrap=True,
                     line_breaks=True,
                     column_widths=[60, 150, 360, 110, 75, 95, 240],
                     max_height=420,
@@ -1321,38 +1328,176 @@ def main():
                 )
 
     _CSS = """
-/* Tombol oval */
-button { border-radius: 9px !important; padding: 8px 24px !important; }
-/* Card lembut (tanpa rounded) */
-.gr-group { padding: 14px !important; border-radius: 0 !important;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important; }
-input, textarea, select { border-radius: 12px !important; }
-/* Chat bubble user -> kanan biru muda, bot -> kiri putih */
-.bubble.user-row { background-color: var(--primary-100) !important; }
-.bubble.bot-row { background-color: var(--color-neutral-50) !important; }
-/* Tabel bentuk kotak biasa: tanpa rounded, teks sel tidak terpotong (bungkus) */
-.table-wrap, table.dataframe { border-radius: 0 !important; }
-table.dataframe th, table.dataframe td { border-radius: 0 !important; }
-/* Header tabel tetap satu baris agar rapi, sel teks boleh membungkus */
-table.dataframe th { white-space: nowrap !important; }
-table.dataframe td { white-space: normal !important; word-break: break-word !important; }
-/* Kotak Percakapan & Konteks Retrieval: latar lebih terang & transparan */
-.soft-box { background-color: rgba(255, 255, 255, 0.35) !important;
-  border: 1px solid rgba(0, 0, 0, 0.05) !important; }
-.soft-box textarea, .soft-box .wrap { background-color: transparent !important; }
-/* Label komponen (Pilih Dokumen, Pertanyaan, dll): warnanya dibedakan
-   dari tombol/input - lebih cerah, transparan, tidak bold */
+/* ==========================================================================
+   1. DASAR KOMPONEN & ELEMEN FORM
+   ========================================================================== */
+
+/* Tombol utama */
+button { 
+  border-radius: 9px !important; 
+  padding: 8px 24px !important; 
+}
+
+/* Card/Container tanpa sudut melengkung */
+.gr-group { 
+  padding: 14px !important; 
+  border-radius: 0 !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important; 
+}
+
+/* Input, Textarea, dan Select umum */
+input, textarea, select { 
+  border-radius: 12px !important; 
+}
+
+/* Teks pada kotak non-interaktif (Readonly / Disabled): dibuat gelap agar kebaca */
+textarea:disabled, input:disabled,
+textarea[readonly], input[readonly] {
+  color: rgba(51, 65, 85, 1) !important;
+  -webkit-text-fill-color: rgba(51, 65, 85, 1) !important;
+  font-weight: 400 !important;
+  opacity: 1 !important;
+}
+
+/* Kotak Pertanyaan (auto-load): samakan dengan input lain sesuai tema */
+textarea[data-testid="textbox"]:disabled,
+textarea[data-testid="textbox"][readonly] {
+  background-color: var(--input-background-fill) !important;
+  color: var(--body-text-color) !important;
+  -webkit-text-fill-color: var(--body-text-color) !important;
+  border-color: var(--input-border-color) !important;
+  opacity: 1 !important;
+}
+
+/* Hilangkan lapisan gradient penutup agar teks tidak tertutup */
+.scroll-fade {
+  background: transparent !important;
+  opacity: 0 !important;
+}
+
+/* Hapus placeholder pada input pertanyaan manual */
+textarea[placeholder="Contoh: Apa perbedaan sawit dan kelapa?"]::placeholder,
+textarea[placeholder="Contoh: Apa perbedaan sawit dan kelapa?"]::-webkit-input-placeholder {
+  color: transparent !important;
+  opacity: 0 !important;
+}
+
+/* ==========================================================================
+   2. LABEL & BADGE (Pilih Dokumen, Pertanyaan, Hasil Evaluasi, dll.)
+   ========================================================================== */
+
 :root {
   --block-label-text-color: rgba(30, 58, 138, 0.9) !important;
   --block-label-text-weight: 600 !important;
 }
-/* Teks di kotak non-interaktif (readonly/disabled): lebih terang & transparan,
-   tidak tebal, agar tidak menonjol seperti tombol input */
-textarea:disabled, input:disabled,
-textarea[readonly], input[readonly] {
-  color: rgba(51, 65, 85, 0.55) !important;
-  -webkit-text-fill-color: rgba(51, 65, 85, 0.55) !important;
+
+/* Label Komponen UI & Label Tabel Dataframe */
+.header-row .label {
+  background: var(--block-label-background-fill) !important;
+  border-radius: var(--block-label-radius) !important;
+  padding: var(--block-label-padding) !important;
+  white-space: nowrap !important;
+  flex: none !important;
+}
+
+.header-row .label p {
+  color: var(--block-label-text-color) !important;
+  font-weight: var(--block-label-text-weight) !important;
+  font-size: var(--block-label-text-size) !important;
+}
+
+/* ==========================================================================
+   3. CHAT BUBBLE & PERCAKAPAN
+   ========================================================================== */
+
+.bubble.user-row { 
+  background-color: var(--color-neutral-50) !important; 
+}
+
+.bubble.bot-row { 
+  background-color: var(--color-neutral-50) !important; 
+}
+
+/* ==========================================================================
+   4. KOTAK PERCAKAPAN & KONTEKS RETRIEVAL (.soft-box)
+   ========================================================================== */
+
+.soft-box { 
+  background-color: var(--block-background-fill) !important;
+  border: 1px solid var(--border-color-primary) !important; 
+  opacity: 1 !important;
+}
+
+.soft-box,
+.soft-box .wrap,
+.soft-box .wrap * {
+  opacity: 1 !important;
+}
+
+/* Isi chat & konteks retrieval mengikuti tema: teks gelap, bubble terang */
+.soft-box .prose,
+.soft-box .prose *,
+.soft-box .wrap span,
+.soft-box .wrap p,
+.soft-box span.text {
+  color: var(--body-text-color) !important;
+  -webkit-text-fill-color: var(--body-text-color) !important;
+  background-color: transparent !important;
   font-weight: 400 !important;
+  visibility: visible !important;
+}
+
+/* Kotak Konteks Retrieval: samakan dengan kolom Percakapan -
+   latar biru gelap + teks putih keabuan terang, tanpa gradient penutup */
+.soft-box textarea[data-testid="textbox"],
+.soft-box textarea[data-testid="textbox"]:disabled,
+.soft-box textarea[data-testid="textbox"][readonly],
+.soft-box .wrap textarea {
+  background-color: var(--primary-700) !important;
+  color: #f1f5f9 !important;
+  -webkit-text-fill-color: #f1f5f9 !important;
+  caret-color: #f1f5f9 !important;
+  border: none !important;
+  box-shadow: none !important;
+  opacity: 1 !important;
+  resize: none !important;
+}
+
+/* ==========================================================================
+   5. STYLING TABEL & DATAFRAME (Teks Pertanyaan Terlihat)
+   ========================================================================== */
+
+.table-wrap, 
+table.dataframe { 
+  border-radius: 0 !important; 
+}
+
+table.dataframe th, 
+table.dataframe td { 
+  border-radius: 0 !important; 
+}
+
+table.dataframe th { 
+  white-space: nowrap !important; 
+}
+
+/* Perbaikan khusus agar teks di sel tabel pertanyaan terlihat jelas */
+table.dataframe td { 
+  white-space: normal !important; 
+  word-break: break-word !important; 
+  color: #f1f5f9 !important;
+  -webkit-text-fill-color: #f1f5f9 !important;
+}
+
+/* Tabel rekap (Gradio 6) */
+.recap-table .virtual-row .cell-wrap span,
+.recap-table .header-cell .header-content span {
+  white-space: normal !important;
+  text-overflow: clip !important;
+  word-break: break-word !important;
+  overflow: visible !important;
+  color: #f1f5f9 !important;
+  -webkit-text-fill-color: #f1f5f9 !important;
 }
 """
 
