@@ -910,16 +910,27 @@ def _chat_context(hits):
 
 
 def _chat_judge_retry(question, answer, context, attempts):
-    """Judge jawaban chat dengan retry. Return ('ok', result) / ('fail', None)."""
+    """Judge jawaban chat dengan retry. Return ('ok', result) / ('fail', pesan_error)."""
+    last_err = ""
     for attempt in range(1, attempts + 1):
         try:
             result = judge_answer(question, answer, context, domain="dokumen yang diupload")
             if result and "error" not in result:
                 return "ok", result
+            last_err = (result or {}).get("error", "Judge tidak mengembalikan hasil.")
         except Exception as e:
+            last_err = str(e)
             print(f"[CHAT-JUDGE] percobaan {attempt}/{attempts}: {e}")
         time.sleep(RETRY_DELAY)
-    return "fail", None
+    return "fail", last_err or "Judge gagal setelah beberapa percobaan."
+
+
+def _chat_judge_placeholder(message):
+    """Tabel placeholder utk penilaian yang tidak dapat dijalankan."""
+    return pd.DataFrame(
+        [["Judge", "—", message]],
+        columns=["Kriteria", "Skor", "Alasan"],
+    )
 
 
 def _chat_judge_df(result):
@@ -982,9 +993,13 @@ def chat_answer(message, history, uploaded):
             except Exception as e:
                 print(f"[CHAT-JUDGE] gagal simpan rekap: {e}")
         else:
-            judge_df = empty_df
+            judge_df = _chat_judge_placeholder(
+                f"Judge gagal dijalankan: {judge_result}"
+            )
     else:
-        judge_df = empty_df
+        judge_df = _chat_judge_placeholder(
+            "Tidak dapat dinilai: tidak ada sumber retrieval (pertanyaan di luar dokumen)."
+        )
     return _pairs_to_messages(pairs), _chat_format_sources(hits), judge_df, status
 
 
@@ -1047,12 +1062,14 @@ def main():
                         fastapi_out = gr.Chatbot(
                             label="Percakapan (Pertanyaan → Jawaban)",
                             height=420,
+                            elem_classes=["soft-box"],
                         )
-                    with gr.Column():
+                    with gr.Column():   
                         trace_out = gr.Textbox(
                             label="Konteks Retrieval (Phoenix)",
                             lines=14,
                             interactive=False,
+                            elem_classes=["soft-box"],
                         )
 
                 with gr.Group():
@@ -1061,14 +1078,20 @@ def main():
                             judge_table = gr.Dataframe(
                                 headers=["Kriteria", "Skor", "Alasan"],
                                 label="Hasil Judge",
+                                show_label=True,
                                 interactive=False,
+                                wrap=True,
+                                line_breaks=True,
+                                column_widths=[120, 60, 420],
+                                max_height=320,
                             )
                         with gr.Column():
                             judge_plot = gr.BarPlot(
                                 x="Kriteria",
                                 y="Skor",
-                                title="Skor per Kriteria",
-                                height=220,
+                                y_lim=[0, 10],
+                                height=180,
+                                sort="-y",
                             )
                             judge_summary = gr.Markdown()
 
@@ -1152,12 +1175,14 @@ def main():
                         up_fastapi = gr.Chatbot(
                             label="Percakapan (Pertanyaan → Jawaban)",
                             height=420,
+                            elem_classes=["soft-box"],
                         )
                     with gr.Column():
                         up_trace = gr.Textbox(
                             label="Konteks Retrieval (Phoenix)",
                             lines=14,
                             interactive=False,
+                            elem_classes=["soft-box"],
                         )
 
                 with gr.Group():
@@ -1166,14 +1191,20 @@ def main():
                             up_table = gr.Dataframe(
                                 headers=["Kriteria", "Skor", "Alasan"],
                                 label="Hasil Judge",
+                                show_label=True,
                                 interactive=False,
+                                wrap=True,
+                                line_breaks=True,
+                                column_widths=[120, 60, 420],
+                                max_height=320,
                             )
                         with gr.Column():
                             up_plot = gr.BarPlot(
                                 x="Kriteria",
                                 y="Skor",
-                                title="Skor per Kriteria",
-                                height=220,
+                                y_lim=[0, 10],
+                                height=180,
+                                sort="-y",
                             )
                             up_summary = gr.Markdown()
 
@@ -1238,7 +1269,12 @@ def main():
                         chat_judge = gr.Dataframe(
                             headers=["Kriteria", "Skor", "Alasan"],
                             label="Penilaian",
+                            show_label=True,
                             interactive=False,
+                            wrap=True,
+                            line_breaks=True,
+                            column_widths=[140, 60, 420],
+                            max_height=320,
                         )
 
                 chat_upload.change(
@@ -1270,8 +1306,14 @@ def main():
                         "Label",
                         "Request ID",
                     ],
-                    label="Hasil evaluasi ",
+                    label="Hasil Evaluasi",
+                    show_label=True,
+                    elem_classes=["recap-table"],
                     interactive=False,
+                    wrap=False,
+                    line_breaks=True,
+                    column_widths=[60, 150, 360, 110, 75, 95, 240],
+                    max_height=420,
                 )
                 refresh_btn = gr.Button("Muat Ulang", variant="secondary")
                 refresh_btn.click(
@@ -1280,14 +1322,38 @@ def main():
 
     _CSS = """
 /* Tombol oval */
-button { border-radius: 999px !important; padding: 8px 24px !important; }
-/* Card lembut */
-.gr-group { padding: 14px !important; border-radius: 18px !important;
+button { border-radius: 9px !important; padding: 8px 24px !important; }
+/* Card lembut (tanpa rounded) */
+.gr-group { padding: 14px !important; border-radius: 0 !important;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important; }
 input, textarea, select { border-radius: 12px !important; }
 /* Chat bubble user -> kanan biru muda, bot -> kiri putih */
 .bubble.user-row { background-color: var(--primary-100) !important; }
 .bubble.bot-row { background-color: var(--color-neutral-50) !important; }
+/* Tabel bentuk kotak biasa: tanpa rounded, teks sel tidak terpotong (bungkus) */
+.table-wrap, table.dataframe { border-radius: 0 !important; }
+table.dataframe th, table.dataframe td { border-radius: 0 !important; }
+/* Header tabel tetap satu baris agar rapi, sel teks boleh membungkus */
+table.dataframe th { white-space: nowrap !important; }
+table.dataframe td { white-space: normal !important; word-break: break-word !important; }
+/* Kotak Percakapan & Konteks Retrieval: latar lebih terang & transparan */
+.soft-box { background-color: rgba(255, 255, 255, 0.35) !important;
+  border: 1px solid rgba(0, 0, 0, 0.05) !important; }
+.soft-box textarea, .soft-box .wrap { background-color: transparent !important; }
+/* Label komponen (Pilih Dokumen, Pertanyaan, dll): warnanya dibedakan
+   dari tombol/input - lebih cerah, transparan, tidak bold */
+:root {
+  --block-label-text-color: rgba(30, 58, 138, 0.9) !important;
+  --block-label-text-weight: 600 !important;
+}
+/* Teks di kotak non-interaktif (readonly/disabled): lebih terang & transparan,
+   tidak tebal, agar tidak menonjol seperti tombol input */
+textarea:disabled, input:disabled,
+textarea[readonly], input[readonly] {
+  color: rgba(51, 65, 85, 0.55) !important;
+  -webkit-text-fill-color: rgba(51, 65, 85, 0.55) !important;
+  font-weight: 400 !important;
+}
 """
 
     demo.launch(
