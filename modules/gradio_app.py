@@ -1120,9 +1120,12 @@ def load_pipeline_recap() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _watcher_loop(stop_event, interval: float = 60.0, hours: int = 24):
-    """Loop background: evaluasi trace staging baru selama app terbuka."""
-    print("[WATCHER] Monitoring trace staging dimulai.")
+def _watcher_loop(stop_event, interval: float = 3600.0, hours: int = 24):
+    """Loop background: evaluasi trace staging baru selama app terbuka.
+
+    Interval default 1 jam (3600 detik). Jendela waktu baca trace
+    ditentukan oleh `hours` (1/12/24 jam) sesuai pilihan dropdown."""
+    print(f"[WATCHER] Monitoring trace staging dimulai (jendela {hours} jam, tiap {interval / 3600:.0f} jam).")
     while not stop_event.is_set():
         try:
             summary = evaluate_new_traces(hours=hours)
@@ -1140,28 +1143,37 @@ def _watcher_loop(stop_event, interval: float = 60.0, hours: int = 24):
 WATCHER_STOP = threading.Event()
 WATCHER_STARTED = False
 WATCHER_THREAD = None
+WATCHER_HOURS = 24
 
 
 def watcher_status() -> str:
     watcher = (
-        "**aktif** — menilai trace staging baru secara berkala."
+        f"**aktif** — menilai trace staging {WATCHER_HOURS} jam terakhir "
+        f"setiap 1 jam."
         if WATCHER_STARTED
-        else "**berhenti** — tekan Start Watcher untuk mulai menilai trace staging baru."
+        else "**berhenti** — pilih jendela waktu, lalu tekan Start Watcher untuk mulai menilai trace staging baru."
     )
     return f"Watcher {watcher}\n\n{tracing_control.status()}"
 
 
-def watcher_start() -> str:
-    global WATCHER_STARTED, WATCHER_THREAD, WATCHER_STOP
+def watcher_start(hours: int = 24) -> str:
+    global WATCHER_STARTED, WATCHER_THREAD, WATCHER_STOP, WATCHER_HOURS
     if WATCHER_STARTED:
-        return watcher_status()
+        if hours == WATCHER_HOURS:
+            return watcher_status()
+        WATCHER_STOP.set()
+        WATCHER_STARTED = False
+        WATCHER_THREAD = None
+        print(f"[WATCHER] Restart dengan jendela waktu {hours} jam.")
     tracing_control.enable()
     pipeline_judge.reset_tracing()
     doc_chat_mod.reset_tracing()
     WATCHER_STOP = threading.Event()
+    WATCHER_HOURS = hours
     WATCHER_THREAD = threading.Thread(
         target=_watcher_loop,
         args=(WATCHER_STOP,),
+        kwargs={"hours": hours},
         daemon=True,
     )
     WATCHER_THREAD.start()
@@ -1324,6 +1336,14 @@ def main():
             with gr.Tab("Evaluasi Pipeline"):
                 with gr.Row():
                     with gr.Group():
+                        pipe_hours_dd = gr.Dropdown(
+                            label="Jendela Waktu Trace (jam)",
+                            choices=[1, 12, 24],
+                            value=1,
+                            scale=1,
+                            min_width=160,
+                        )
+                    with gr.Group():
                         pipe_watch_status = gr.Markdown(watcher_status())
                     with gr.Group():
                         pipe_watch_start_btn = gr.Button(
@@ -1358,7 +1378,7 @@ def main():
                 )
 
                 pipe_watch_start_btn.click(
-                    watcher_start, inputs=[], outputs=[pipe_watch_status]
+                    watcher_start, inputs=[pipe_hours_dd], outputs=[pipe_watch_status]
                 )
                 pipe_watch_stop_btn.click(
                     watcher_stop, inputs=[], outputs=[pipe_watch_status]

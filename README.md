@@ -90,7 +90,9 @@ Bagian tampilan:
 - Setiap hasil evaluasi disimpan ke `output/evaluations.jsonl` (satu baris JSON per evaluasi: timestamp, pertanyaan, request_id, jawaban, preview konteks, jumlah dokumen acuan `n_acuan`, skor 3 kriteria, total, label, kesimpulan).
 
 **Tab Evaluasi Pipeline** — dashboard watcher trace staging (tanpa POST):
-- Dropdown menampilkan trace staging (dari `PHOENIX_RETRIEVE_PROJECT`) beserta waktu mulai dan pertanyaan; bintang `✔` menandai yang sudah dinilai.
+- Dropdown **Jendela Waktu Trace** (1/12/24 jam) menentukan rentang trace staging yang dibaca dari `PHOENIX_RETRIEVE_PROJECT`; pilih dulu, lalu tekan **Start Watcher**.
+- **Watcher** menilai trace staging baru **setiap 1 jam** (interval tetap, jendela waktu sesuai dropdown; mengubah dropdown lalu Start lagi akan me-restart watcher dengan jendela baru). Anti-duplikasi by `trace_id` — trace yang sudah dinilai tidak di-judge ulang, yang gagal dicoba lagi di putaran berikutnya.
+- Dropdown menampilkan trace staging beserta waktu mulai dan pertanyaan; bintang `✔` menandai yang sudah dinilai.
 - **Muat Ulang Trace** — memuat ulang daftar trace. **Evaluasi** — menilai satu trace terpilih (insight → judge 4 kriteria). **Auto Evaluasi Baru** — menilai semua trace baru dalam rentang jam yang ditentukan (default 24, anti-duplikasi by `trace_id`).
 - **Insight Pipeline** menampilkan intent, pertanyaan parafrase, query utama/expansions, reasoning, memori, dst (tanpa konteks retrieval); **tabel + grafik** skor 4 kriteria (1–10) + ringkasan.
 - Saat app dibuka, **watcher background** otomatis menilai trace staging baru secara berkala. Hasil tersimpan ke `output/evaluations_pipeline.jsonl` dan ikut muncul sebagai trace di project `PHOENIX_SEND_PROJECT` (AutoAssesment).

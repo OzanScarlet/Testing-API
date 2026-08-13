@@ -2,7 +2,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -175,7 +175,7 @@ def _find_trace_id(request_id, question):
 
             df = client.spans.get_spans_dataframe(
                 project_name=PHOENIX_RETRIEVE_PROJECT,
-                start_time=datetime.now() - timedelta(minutes=3),
+                start_time=datetime.now(timezone.utc) - timedelta(minutes=3),
                 limit=1000,
                 timeout=30,
             )
@@ -208,7 +208,7 @@ def list_staging_traces(hours: int = 24, limit: int = 200):
     try:
         traces = client.traces.get_traces(
             project_identifier=PHOENIX_RETRIEVE_PROJECT,
-            start_time=datetime.now() - timedelta(hours=hours),
+            start_time=datetime.now(timezone.utc) - timedelta(hours=hours),
             sort="start_time",
             order="desc",
             include_spans=False,

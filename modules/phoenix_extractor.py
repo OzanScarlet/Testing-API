@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -63,7 +63,7 @@ def _find_trace_id(request_id, question):
         try:
             df = client.spans.get_spans_dataframe(
                 project_name=PHOENIX_RETRIEVE_PROJECT,
-                start_time=datetime.now() - timedelta(minutes=3),
+                start_time=datetime.now(timezone.utc) - timedelta(minutes=3),
                 limit=1000,
                 timeout=30,
             )
