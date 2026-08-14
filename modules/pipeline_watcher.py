@@ -11,10 +11,13 @@ from modules.pipeline_extractor import (
     get_pipeline_insights,
     list_staging_traces,
     _extract_question_from_trace,
+    PHOENIX_PIPELINE_PROJECT,
 )
+from modules.phoenix_extractor import get_trace_output, get_retrieval_context_from_trace
 from modules.pipeline_judge import judge_pipeline
 
 PIPELINE_EVAL_PATH = Path(__file__).resolve().parents[1] / "output" / "evaluations_pipeline.jsonl"
+PIPELINE_SOURCE_PROJECT = os.getenv("PHOENIX_PIPELINE_PROJECT") or PHOENIX_PIPELINE_PROJECT
 
 
 # --- anti-duplikasi ---
@@ -55,31 +58,58 @@ def _build_rec(trace_id, question, result) -> dict:
         "query_expansion": result.get("query_expansion"),
         "reasoning": result.get("reasoning"),
         "memory_continuity": result.get("memory_continuity"),
+        "ketepatan_sitasi": result.get("ketepatan_sitasi"),
         "total": result.get("total"),
+        "alasan": result.get("alasan"),
+        "saran": result.get("saran"),
         "kesimpulan": result.get("kesimpulan"),
     }
 
 
-def evaluate_new_traces(hours: int = 24, limit: int = 200, on_progress=None):
+def evaluate_new_traces(hours: int = 24, limit: int = 200, on_progress=None, stop_event=None):
     """Baca trace baru dari staging, nilai pipeline, simpan hasil.
 
-    Langkah per trace: ekstrak pertanyaan -> insights -> judge -> simpan.
-    Return dict ringkasan {'total', 'ok', 'gagal', 'detail'}."""
+    Satu request menghasilkan 2 trace: trace utama (punya output/pertanyaan)
+    dan trace kosong (input-only, tanpa output). Hanya trace yang punya output
+    yang dievaluasi; trace tanpa output dilewati (`dilewati`) tanpa dihitung
+    gagal dan tanpa disimpan.
+
+    Langkah per trace: cek output -> ekstrak pertanyaan -> insights -> judge -> simpan.
+    `stop_event` (threading.Event) jika di-set akan menghentikan evaluasi di
+    trace berikutnya. Return dict ringkasan {'total', 'ok', 'gagal', 'dilewati', 'detail'}."""
     evaluated = _load_evaluated_trace_ids()
-    traces = list_staging_traces(hours=hours, limit=limit)
+    traces = list_staging_traces(
+        hours=hours, limit=limit, project_name=PIPELINE_SOURCE_PROJECT
+    )
 
     new_traces = [t for t in traces if t["trace_id"] not in evaluated]
     detail = []
     ok = 0
     gagal = 0
+    dilewati = 0
 
     for i, t in enumerate(new_traces, start=1):
         trace_id = t["trace_id"]
+        if stop_event is not None and stop_event.is_set():
+            print("[WATCHER] Evaluasi dihentikan oleh pengguna.")
+            break
         if on_progress:
             on_progress(f"Trace {i}/{len(new_traces)}: {trace_id[:12]}...")
 
         try:
-            question = _extract_question_from_trace(trace_id)
+            output = get_trace_output(trace_id, project_name=PIPELINE_SOURCE_PROJECT)
+        except Exception as e:
+            print(f"[WATCHER][{trace_id}] Gagal cek output: {e}")
+            output = None
+        if not output:
+            detail.append({"trace_id": trace_id, "status": "dilewati"})
+            dilewati += 1
+            continue
+
+        try:
+            question = _extract_question_from_trace(
+                trace_id, project_name=PIPELINE_SOURCE_PROJECT
+            )
             if not question:
                 detail.append({"trace_id": trace_id, "status": "tanpa_pertanyaan"})
                 gagal += 1
@@ -91,7 +121,9 @@ def evaluate_new_traces(hours: int = 24, limit: int = 200, on_progress=None):
             continue
 
         try:
-            insights = get_pipeline_insights(None, None, trace_id=trace_id)
+            insights = get_pipeline_insights(
+                None, None, trace_id=trace_id, project_name=PIPELINE_SOURCE_PROJECT
+            )
         except Exception as e:
             print(f"[WATCHER][{trace_id}] Gagal ambil insight: {e}")
             insights = None
@@ -101,7 +133,20 @@ def evaluate_new_traces(hours: int = 24, limit: int = 200, on_progress=None):
             continue
 
         try:
-            result = judge_pipeline(question, insights)
+            retrieval_context = get_retrieval_context_from_trace(
+                trace_id, project_name=PIPELINE_SOURCE_PROJECT
+            )
+        except Exception as e:
+            print(f"[WATCHER][{trace_id}] Gagal ambil konteks retrieval: {e}")
+            retrieval_context = None
+
+        try:
+            result = judge_pipeline(
+                question,
+                insights,
+                answer=output,
+                retrieval_context=retrieval_context,
+            )
         except Exception as e:
             print(f"[WATCHER][{trace_id}] Gagal judge: {e}")
             detail.append({"trace_id": trace_id, "status": "error", "error": str(e)})
@@ -125,7 +170,7 @@ def evaluate_new_traces(hours: int = 24, limit: int = 200, on_progress=None):
             }
         )
 
-    return {"total": len(new_traces), "ok": ok, "gagal": gagal, "detail": detail}
+    return {"total": len(new_traces), "ok": ok, "gagal": gagal, "dilewati": dilewati, "detail": detail}
 
 
 def main():

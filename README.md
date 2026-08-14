@@ -22,8 +22,8 @@ Output: `output/questions.json`. Jalankan ulang untuk **resume otomatis** — fi
 | `modules/phoenix_extractor.py` | POST + ambil jawaban / konteks retrieval dari trace Phoenix (span `retrieve_context_and_extract`) |
 | `modules/judge.py` | POST → ambil trace → nilai 3 kriteria (interaktif, terminal) |
 | `modules/doc_chat.py` | Chat Dokumen (RAG lokal): indeks dokumen diupload ke Qdrant (embedded, tanpa Docker) + embedding `intfloat/multilingual-e5-small`, chat multi-turn hanya seputar dokumen (hybrid — jika pertanyaan di luar dokumen, jawab dari pengetahuan umum) |
-| `modules/pipeline_extractor.py` | Ambil insight pipeline (extractor/`preprocess_and_gate`) dari trace Phoenix — membaca dari `PHOENIX_RETRIEVE_PROJECT`. Punya `list_staging_traces` (daftar trace tanpa POST) dan `_extract_question_from_trace` |
-| `modules/pipeline_judge.py` | LLM Judge V2: nilai pipeline 4 kriteria (intent & understanding, query expansion, reasoning, memory continuity, skala 1–10); hasilnya ikut tercatat ke `PHOENIX_SEND_PROJECT` via `OpenAIInstrumentor` + `px.register` |
+| `modules/pipeline_extractor.py` | Ambil insight pipeline (extractor/`preprocess_and_gate`) dari trace Phoenix — membaca dari `PHOENIX_PIPELINE_PROJECT` saat dipakai watcher (default staging via `PHOENIX_RETRIEVE_PROJECT`). Punya `list_staging_traces` (daftar trace tanpa POST) dan `_extract_question_from_trace` |
+| `modules/pipeline_judge.py` | LLM Judge V2: nilai pipeline 5 kriteria (intent & understanding, query expansion, reasoning, memory continuity, ketepatan sitasi; skala 1–10); hasilnya ikut tercatat ke `PHOENIX_SEND_PROJECT` via `OpenAIInstrumentor` + `px.register` |
 | `modules/pipeline_watcher.py` | Watcher: baca trace baru dari staging → nilai pipeline otomatis → simpan ke `output/evaluations_pipeline.jsonl` (anti-duplikasi by `trace_id`) |
 | `modules/gradio_app.py` | Dashboard Gradio: 5 tab (Evaluasi + Evaluasi Pipeline + Upload Dokumen + Chat Dokumen + Rekapitulasi). Evaluasi: pilih dokumen (satu atau banyak) → pertanyaan auto sequence 1 per 1 (atau ketik manual) → POST → trace → judge (tabel + grafik), hasil disimpan ke `output/evaluations.jsonl`. Bisa **Auto Evaluasi** (file terpilih berurutan tanpa klik, pindah file otomatis, retry sampai sukses) atau **1 Tombol Generate → Evaluasi** (upload banyak file `.md/.txt/.pdf/.docx/.doc` → generate pertanyaan → langsung POST → trace → judge). Evaluasi Pipeline: dashboard watcher trace staging (tanpa POST) — daftar trace → evaluasi satu per satu / auto semua yang baru → rekap. Chat Dokumen: upload file → otomatis diindeks → tanya bebas seputar isinya (multi-turn + panel sumber). Rekapitulasi: tabel hasil dari jsonl (termasuk jumlah dokumen acuan `n_acuan`) |
 | `data/` | Kumpulan dokumen `.md` sumber |
@@ -65,7 +65,7 @@ python modules/pipeline_watcher.py --hours 24 --limit 200
 # baca trace baru dari staging -> nilai pipeline -> simpan jsonl + trace ke AutoAssesment
 ```
 
-Menilai semua trace baru dari `PHOENIX_RETRIEVE_PROJECT` dalam rentang jam tertentu; trace yang sudah dievaluasi (`trace_id`) dilewati. Juga berjalan otomatis di background saat app Gradio dibuka.
+Menilai semua trace baru dari `PHOENIX_PIPELINE_PROJECT` (default `ChatOPA-production`) dalam rentang jam tertentu. Satu request menghasilkan 2 trace: trace utama (punya output) dan trace kosong (input-only, tanpa output). **Hanya trace yang punya output yang dievaluasi** — trace tanpa output dilewati (status `dilewati`) tanpa dihitung gagal dan tanpa disimpan. Trace yang sudah dievaluasi (`trace_id`) juga dilewati.
 
 ## UI Gradio
 
@@ -90,23 +90,25 @@ Bagian tampilan:
 - Setiap hasil evaluasi disimpan ke `output/evaluations.jsonl` (satu baris JSON per evaluasi: timestamp, pertanyaan, request_id, jawaban, preview konteks, jumlah dokumen acuan `n_acuan`, skor 3 kriteria, total, label, kesimpulan).
 
 **Tab Evaluasi Pipeline** — dashboard watcher trace staging (tanpa POST):
-- Dropdown **Jendela Waktu Trace** (1/12/24 jam) menentukan rentang trace staging yang dibaca dari `PHOENIX_RETRIEVE_PROJECT`; pilih dulu, lalu tekan **Start Watcher**.
-- **Watcher** menilai trace staging baru **setiap 1 jam** (interval tetap, jendela waktu sesuai dropdown; mengubah dropdown lalu Start lagi akan me-restart watcher dengan jendela baru). Anti-duplikasi by `trace_id` — trace yang sudah dinilai tidak di-judge ulang, yang gagal dicoba lagi di putaran berikutnya.
+- Sumber trace dibaca dari project `PHOENIX_PIPELINE_PROJECT` (default `ChatOPA-production`), terpisah dari `PHOENIX_RETRIEVE_PROJECT` yang dipakai tab Evaluasi (POST).
+- Dropdown **Jendela Waktu Trace** (1/12/24 jam) menentukan rentang trace yang dibaca; pilih dulu, lalu tekan **Start Watcher**.
+- **Start Watcher** menjalankan evaluasi **sekali** — membaca trace `n` jam terakhir sampai beres (tanpa interval berulang). Hasil muncul **1 per 1** di tabel rekap secara otomatis (refresh otomatis tiap 3 detik). **Stop Watcher** menghentikan proses di tengah jalan (trace yang tersisa dilewati). Anti-duplikasi by `trace_id` — trace yang sudah dinilai tidak di-judge ulang, yang gagal dicoba lagi di putaran berikutnya.
 - Dropdown menampilkan trace staging beserta waktu mulai dan pertanyaan; bintang `✔` menandai yang sudah dinilai.
-- **Muat Ulang Trace** — memuat ulang daftar trace. **Evaluasi** — menilai satu trace terpilih (insight → judge 4 kriteria). **Auto Evaluasi Baru** — menilai semua trace baru dalam rentang jam yang ditentukan (default 24, anti-duplikasi by `trace_id`).
-- **Insight Pipeline** menampilkan intent, pertanyaan parafrase, query utama/expansions, reasoning, memori, dst (tanpa konteks retrieval); **tabel + grafik** skor 4 kriteria (1–10) + ringkasan.
-- Saat app dibuka, **watcher background** otomatis menilai trace staging baru secara berkala. Hasil tersimpan ke `output/evaluations_pipeline.jsonl` dan ikut muncul sebagai trace di project `PHOENIX_SEND_PROJECT` (AutoAssesment).
+- **Muat Ulang Trace** — memuat ulang daftar trace. **Evaluasi** — menilai satu trace terpilih (insight → judge 5 kriteria). **Auto Evaluasi Baru** — menilai semua trace baru dalam rentang jam yang ditentukan (default 24, anti-duplikasi by `trace_id`).
+- **Insight Pipeline** menampilkan intent, pertanyaan parafrase, query utama/expansions, reasoning, memori, dst (tanpa konteks retrieval); **tabel + grafik** skor 5 kriteria (1–10) + ringkasan. Rekap mencakup kolom **Ketepatan Sitasi**, **Alasan**, dan **Saran** (ringkas).
+- Hasil tersimpan ke `output/evaluations_pipeline.jsonl` dan ikut muncul sebagai trace di project `PHOENIX_SEND_PROJECT` (AutoAssesment).
 
 **Tab Chat Dokumen** — RAG lokal tanpa Docker:
 - **Upload satu atau beberapa dokumen** (`.md/.txt/.pdf/.docx/.doc`) → otomatis dipecah menjadi chunk, di-embedding (model `intfloat/multilingual-e5-small` via fastembed, unduh sekali dari Hugging Face), dan diindeks ke **Qdrant embedded** (`output/qdrant_db/`). Setiap upload/index baru **menghapus index lama** → chat selalu hanya tentang set dokumen terbaru.
 - Tanya bebas **seputar dokumen** (multi-turn). Jawaban diambil dari **top-`RAG_TOP_K` chunk paling relevan** dengan rujukan `[n]`. Jika pertanyaan **di luar dokumen**, AI tetap menjawab dari pengetahuan umum dan menyebut bahwa info tidak tersedia di dokumen (**hybrid**).
 - Panel **Sumber** menampilkan nama file + skor relevansi + cuplikan chunk untuk setiap jawaban. Tombol **Reset** membersihkan riwayat chat.
 
-**Tab Rekapitulasi** — tabel semua hasil evaluasi dari `output/evaluations.jsonl` (Timestamp, Pertanyaan, Dokumen Acuan, Total, Label, Request ID); klik **Muat Ulang** untuk refresh. Untuk evaluasi pipeline, tabel **Rekap Evaluasi Pipeline** dari `output/evaluations_pipeline.jsonl` (Timestamp, Pertanyaan, 4 kriteria, Total, Trace ID).
+**Tab Rekapitulasi** — tabel semua hasil evaluasi dari `output/evaluations.jsonl` (Timestamp, Pertanyaan, Dokumen Acuan, Total, Label, Request ID); klik **Muat Ulang** untuk refresh. Untuk evaluasi pipeline, tabel **Rekap Evaluasi Pipeline** dari `output/evaluations_pipeline.jsonl` (Timestamp, Pertanyaan, 5 kriteria, Total, Alasan, Saran, Trace ID).
 
 Konfigurasi dibaca dari `.env`:
 - `PHOENIX_BASE_URL` — base URL Phoenix (contoh `https://phoenix.example.com`)
-- `PHOENIX_RETRIEVE_PROJECT` — project Phoenix yang **dibaca** (retrieve trace RAG), default `ChatOPA-staging`
+- `PHOENIX_RETRIEVE_PROJECT` — project Phoenix yang **dibaca** (retrieve trace RAG) untuk tab Evaluasi (POST), default `ChatOPA-staging`
+- `PHOENIX_PIPELINE_PROJECT` — project sumber trace **Watcher Evaluasi Pipeline** (tanpa POST), default `ChatOPA-production`
 - `PHOENIX_SEND_PROJECT` — project Phoenix tujuan **kirim** trace hasil evaluasi LLM Judge, default `AutoAssesment`
 - `PHOENIX_COLLECTOR_ENDPOINT` — endpoint OTLP collector (biasanya `{PHOENIX_BASE_URL}/v1/traces`)
 - `PHOENIX_PROJECT_NAME` — nama project fallback bila `PHOENIX_RETRIEVE_PROJECT` tidak diset
@@ -117,15 +119,16 @@ Konfigurasi dibaca dari `.env`:
 ### Penilaian Pipeline (LLM Judge V2) — tanpa POST
 
 Alur **baca trace → nilai → kirim hasil** (tidak ada POST ke chatbot sama sekali):
-1. Trace chatbot ditulis server-side ke `PHOENIX_RETRIEVE_PROJECT` (`ChatOPA-staging`) — tidak diubah apa pun di sana.
-2. App membaca trace staging (`list_staging_traces` + `get_pipeline_insights(trace_id)`), ekstrak pertanyaan langsung dari trace.
+1. Trace chatbot ditulis server-side ke project yang dibaca (watcher: `PHOENIX_PIPELINE_PROJECT`, default `ChatOPA-production`) — tidak diubah apa pun di sana.
+2. Watcher membaca trace (`list_staging_traces` + `get_pipeline_insights(trace_id)` dari `PHOENIX_PIPELINE_PROJECT`), ekstrak pertanyaan langsung dari trace.
 3. `pipeline_judge.py` menilai dan hasilnya dikirim ke `PHOENIX_SEND_PROJECT` (`AutoAssesment`) via `OpenAIInstrumentor` + `px.register` → hasil muncul sebagai trace di Phoenix (dashboard bawaan Phoenix).
-4. `pipeline_watcher.py` berjalan otomatis saat app Gradio terbuka (thread background, polling berkala); anti-duplikasi by `trace_id`. Rekap disimpan ke `output/evaluations_pipeline.jsonl`.
+4. `pipeline_watcher.py` berjalan dari tombol **Start Watcher** (evaluasi sekali per klik); anti-duplikasi by `trace_id`. Rekap disimpan ke `output/evaluations_pipeline.jsonl`.
 
 Distinct tracing peran Phoenix:
-- **Retrieve** (`PHOENIX_RETRIEVE_PROJECT`): data trace RAG ditarik dari project tempat chatbot menulis (saat ini `ChatOPA-staging`).
+- **Retrieve** (`PHOENIX_RETRIEVE_PROJECT`): data trace RAG untuk tab Evaluasi (POST) ditarik dari project `ChatOPA-staging`.
+- **Pipeline** (`PHOENIX_PIPELINE_PROJECT`): sumber trace Watcher Evaluasi Pipeline (tanpa POST), default `ChatOPA-production`.
 - **Send** (`PHOENIX_SEND_PROJECT`): hasil penilaian dan seluruh panggilan LLM evaluator dikirim ke project `AutoAssesment` (via `OpenAIInstrumentor` + `px.register`).
-- Evaluator menilai **4 kriteria skala 1–10**: `intent_understanding` (akurasi `primary_query` & `intent`), `query_expansion` (relevansi `query_expansions`; otomatis 10 jika casual chat/tanpa retrieval), `reasoning` (logika RAG), `memory_continuity` (harmoni `turn.history`, `session_state`, `memory_queries`). Output: skor per kriteria + `total` (rata-rata) + `kesimpulan`.
+- Evaluator menilai **5 kriteria skala 1–10**: `intent_understanding` (akurasi `primary_query` & `intent`), `query_expansion` (relevansi `query_expansions`; otomatis 10 jika casual chat/tanpa retrieval), `reasoning` (logika RAG), `memory_continuity` (harmoni `turn.history`, `session_state`, `memory_queries`), `ketepatan_sitasi` (cocokkan referensi `[n]` di jawaban vs isi sumber `[n]` pada konteks retrieval; **jika jawaban tanpa sitasi atau tanpa konteks retrieval → skor 0**). Output: skor per kriteria + `total` (rata-rata) + `kesimpulan`.
 
 ## Konfigurasi (`.env`)
 
@@ -137,7 +140,7 @@ Distinct tracing peran Phoenix:
 
 **Chatbot:** `CHATOPA_URL` (endpoint `/chat`), `CHATOPA_API_KEY` (header `x-api-key`).
 
-**Phoenix:** `PHOENIX_BASE_URL`, `PHOENIX_RETRIEVE_PROJECT` (baca trace, default `ChatOPA-staging`), `PHOENIX_SEND_PROJECT` (kirim trace evaluasi, default `AutoAssesment`), `PHOENIX_COLLECTOR_ENDPOINT` (OTLP, biasanya `{base}/v1/traces`), `PHOENIX_API_KEY` (tanpa awalan `Bearer `).
+**Phoenix:** `PHOENIX_BASE_URL`, `PHOENIX_RETRIEVE_PROJECT` (baca trace tab Evaluasi/POST, default `ChatOPA-staging`), `PHOENIX_PIPELINE_PROJECT` (sumber trace watcher, default `ChatOPA-production`), `PHOENIX_SEND_PROJECT` (kirim trace evaluasi, default `AutoAssesment`), `PHOENIX_COLLECTOR_ENDPOINT` (OTLP, biasanya `{base}/v1/traces`), `PHOENIX_API_KEY` (tanpa awalan `Bearer `).
 
 ## Catatan
 
