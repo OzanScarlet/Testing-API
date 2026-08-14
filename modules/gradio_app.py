@@ -3,8 +3,9 @@ import json
 import os
 import re
 import sys
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import gradio as gr
@@ -18,15 +19,21 @@ from modules.phoenix_extractor import get_retrieval_context
 from modules.questions_generator import iter_generate_questions_from_files
 from modules.doc_chat import ask as doc_ask
 from modules.doc_chat import index_documents as doc_index
+from modules import doc_chat as doc_chat_mod
+from modules.pipeline_watcher import evaluate_new_traces
+from modules import tracing_control
+from modules import pipeline_judge
 
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parents[1]
 QUESTIONS_PATH = ROOT / "output" / "questions.json"
 EVAL_PATH = ROOT / "output" / "evaluations.jsonl"
+PIPELINE_EVAL_PATH = ROOT / "output" / "evaluations_pipeline.jsonl"
 
 FILES = []
 DONE = set()
+PIPELINE_DONE = set()
 
 SKIP_JUDGE = False  # Judge aktif (mode normal): POST -> GET -> judge.
 
@@ -61,6 +68,30 @@ def load_done():
 def save_eval(rec: dict):
     EVAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(EVAL_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def load_pipeline_done():
+    global PIPELINE_DONE
+    PIPELINE_DONE = set()
+    if not PIPELINE_EVAL_PATH.exists():
+        return
+    with open(PIPELINE_EVAL_PATH, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("trace_id") and rec.get("total") is not None and not rec.get("error"):
+                PIPELINE_DONE.add(rec["trace_id"])
+
+
+def save_pipeline_eval(rec: dict):
+    PIPELINE_EVAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(PIPELINE_EVAL_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
@@ -1061,6 +1092,107 @@ def chat_reset():
     return [], "", _empty_judge_df(), "Chat dibersihkan."
 
 
+def load_pipeline_recap() -> pd.DataFrame:
+    """Baca output/evaluations_pipeline.jsonl -> DataFrame."""
+    rows = []
+    if PIPELINE_EVAL_PATH.exists():
+        with open(PIPELINE_EVAL_PATH, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rows.append(
+                    {
+                        "Timestamp": rec.get("timestamp"),
+                        "Pertanyaan": rec.get("question"),
+                        "Intent & Understanding": (rec.get("intent_understanding") or {}).get("skor"),
+                        "Query Expansion": (rec.get("query_expansion") or {}).get("skor"),
+                        "Reasoning": (rec.get("reasoning") or {}).get("skor"),
+                        "Memory Continuity": (rec.get("memory_continuity") or {}).get("skor"),
+                        "Total": rec.get("total"),
+                        "Trace ID": rec.get("trace_id"),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _watcher_loop(stop_event, interval: float = 3600.0, hours: int = 24):
+    """Loop background: evaluasi trace staging baru selama app terbuka.
+
+    Interval default 1 jam (3600 detik). Jendela waktu baca trace
+    ditentukan oleh `hours` (1/12/24 jam) sesuai pilihan dropdown."""
+    print(f"[WATCHER] Monitoring trace staging dimulai (jendela {hours} jam, tiap {interval / 3600:.0f} jam).")
+    while not stop_event.is_set():
+        try:
+            summary = evaluate_new_traces(hours=hours)
+            if summary["ok"]:
+                print(
+                    f"[WATCHER] Evaluasi baru: ok={summary['ok']} "
+                    f"gagal={summary['gagal']} (total {summary['total']})"
+                )
+        except Exception as e:
+            print(f"[WATCHER] Error: {e}")
+        stop_event.wait(interval)
+    print("[WATCHER] Monitoring dihentikan.")
+
+
+WATCHER_STOP = threading.Event()
+WATCHER_STARTED = False
+WATCHER_THREAD = None
+WATCHER_HOURS = 24
+
+
+def watcher_status() -> str:
+    watcher = (
+        f"**aktif** — menilai trace staging {WATCHER_HOURS} jam terakhir "
+        f"setiap 1 jam."
+        if WATCHER_STARTED
+        else "**berhenti** — pilih jendela waktu, lalu tekan Start Watcher untuk mulai menilai trace staging baru."
+    )
+    return f"Watcher {watcher}\n\n{tracing_control.status()}"
+
+
+def watcher_start(hours: int = 24) -> str:
+    global WATCHER_STARTED, WATCHER_THREAD, WATCHER_STOP, WATCHER_HOURS
+    if WATCHER_STARTED:
+        if hours == WATCHER_HOURS:
+            return watcher_status()
+        WATCHER_STOP.set()
+        WATCHER_STARTED = False
+        WATCHER_THREAD = None
+        print(f"[WATCHER] Restart dengan jendela waktu {hours} jam.")
+    tracing_control.enable()
+    pipeline_judge.reset_tracing()
+    doc_chat_mod.reset_tracing()
+    WATCHER_STOP = threading.Event()
+    WATCHER_HOURS = hours
+    WATCHER_THREAD = threading.Thread(
+        target=_watcher_loop,
+        args=(WATCHER_STOP,),
+        kwargs={"hours": hours},
+        daemon=True,
+    )
+    WATCHER_THREAD.start()
+    WATCHER_STARTED = True
+    return watcher_status()
+
+
+def watcher_stop() -> str:
+    global WATCHER_STARTED, WATCHER_THREAD
+    if not WATCHER_STARTED:
+        return watcher_status()
+    WATCHER_STOP.set()
+    WATCHER_STARTED = False
+    WATCHER_THREAD = None
+    tracing_control.disable()
+    return watcher_status()
+
+
+
 def main():
     if not os.getenv("CHATOPA_URL") or not os.getenv("CHATOPA_API_KEY"):
         print("Konfigurasi CHATOPA_URL / CHATOPA_API_KEY belum lengkap di .env.")
@@ -1069,6 +1201,7 @@ def main():
 
     load_files()
     load_done()
+    load_pipeline_done()
 
     with gr.Blocks(title="Dashboard Evaluasi Chatbot RAG") as demo:
         with gr.Tabs():
@@ -1199,6 +1332,61 @@ def main():
                     outputs=[auto_status],
                     cancels=[auto_event],
                 )
+
+            with gr.Tab("Evaluasi Pipeline"):
+                with gr.Row():
+                    with gr.Group():
+                        pipe_hours_dd = gr.Dropdown(
+                            label="Jendela Waktu Trace (jam)",
+                            choices=[1, 12, 24],
+                            value=1,
+                            scale=1,
+                            min_width=160,
+                        )
+                    with gr.Group():
+                        pipe_watch_status = gr.Markdown(watcher_status())
+                    with gr.Group():
+                        pipe_watch_start_btn = gr.Button(
+                            "Start Watcher", variant="secondary", scale=1, min_width=140
+                        )
+                        pipe_watch_stop_btn = gr.Button(
+                            "Stop Watcher", variant="stop", scale=1, min_width=140
+                        )
+
+                pipe_pipeline_recap = gr.Dataframe(
+                    headers=[
+                        "Timestamp",
+                        "Pertanyaan",
+                        "Intent & Understanding",
+                        "Query Expansion",
+                        "Reasoning",
+                        "Memory Continuity",
+                        "Total",
+                        "Trace ID",
+                    ],
+                    label="Rekap Hasil Evaluasi Pipeline",
+                    show_label=True,
+                    interactive=False,
+                    wrap=True,
+                    line_breaks=True,
+                    column_widths=[150, 360, 130, 120, 90, 130, 75, 240],
+                    max_height=420,
+                    value=load_pipeline_recap(),
+                )
+                pipe_pipeline_refresh_btn = gr.Button(
+                    "Muat Ulang Hasil", variant="secondary"
+                )
+
+                pipe_watch_start_btn.click(
+                    watcher_start, inputs=[pipe_hours_dd], outputs=[pipe_watch_status]
+                )
+                pipe_watch_stop_btn.click(
+                    watcher_stop, inputs=[], outputs=[pipe_watch_status]
+                )
+                pipe_pipeline_refresh_btn.click(
+                    load_pipeline_recap, inputs=[], outputs=[pipe_pipeline_recap]
+                )
+
 
             with gr.Tab("Upload Dokumen"):
                 with gr.Row():
@@ -1370,6 +1558,31 @@ def main():
                 refresh_btn = gr.Button("Muat Ulang", variant="secondary")
                 refresh_btn.click(
                     load_recap, inputs=[], outputs=[recap_table]
+                )
+
+                pipe_recap_table = gr.Dataframe(
+                    headers=[
+                        "Timestamp",
+                        "Pertanyaan",
+                        "Intent & Understanding",
+                        "Query Expansion",
+                        "Reasoning",
+                        "Memory Continuity",
+                        "Total",
+                        "Trace ID",
+                    ],
+                    label="Rekap Evaluasi Pipeline",
+                    show_label=True,
+                    elem_classes=["recap-table"],
+                    interactive=False,
+                    wrap=True,
+                    line_breaks=True,
+                    column_widths=[150, 360, 130, 120, 90, 130, 75, 240],
+                    max_height=420,
+                )
+                pipe_refresh_btn = gr.Button("Muat Ulang Rekap Pipeline", variant="secondary")
+                pipe_refresh_btn.click(
+                    load_pipeline_recap, inputs=[], outputs=[pipe_recap_table]
                 )
 
     _CSS = """

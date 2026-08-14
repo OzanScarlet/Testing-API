@@ -25,7 +25,7 @@ MODEL_NAME = os.getenv("MODEL_NAME")
 BASE_URL = os.getenv("BASE_URL")
 
 PHOENIX_ENDPOINT = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "https://phoenix.rpn.my.id/v1/traces")
-PHOENIX_PROJECT = os.getenv("DOC_CHAT_PHOENIX_PROJECT", "ChatOPA-staging")
+PHOENIX_PROJECT = os.getenv("DOC_CHAT_PHOENIX_PROJECT", "AutoAssesment")
 
 MAX_RETRIES = 6
 MAX_DELAY = 60.0
@@ -42,6 +42,11 @@ def _init_tracing():
     global _tracing_ready
     if _tracing_ready:
         return
+    from modules.tracing_control import is_disabled
+
+    if is_disabled():
+        _tracing_ready = True
+        return
     try:
         from phoenix.otel import register
 
@@ -56,6 +61,12 @@ def _init_tracing():
         print(f"[TRACE] Tracing aktif -> {PHOENIX_ENDPOINT} (project {PHOENIX_PROJECT}).")
     except Exception as e:
         print(f"[TRACE] Gagal mengaktifkan tracing: {e}")
+
+
+def reset_tracing():
+    """Buka kunci lazy init agar tracing bisa dipasang ulang."""
+    global _tracing_ready
+    _tracing_ready = False
 
 
 def bump_delay():

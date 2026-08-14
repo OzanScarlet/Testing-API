@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -12,7 +12,7 @@ load_dotenv()
 CHATOPA_URL = os.getenv("CHATOPA_URL")
 CHATOPA_API_KEY = os.getenv("CHATOPA_API_KEY")
 PHOENIX_BASE_URL = os.getenv("PHOENIX_BASE_URL")
-PHOENIX_PROJECT_NAME = os.getenv("PHOENIX_PROJECT_NAME")
+PHOENIX_RETRIEVE_PROJECT = os.getenv("PHOENIX_RETRIEVE_PROJECT") or os.getenv("PHOENIX_PROJECT_NAME")
 
 POLL_INTERVAL = 2.0
 POLL_TIMEOUT = 60.0
@@ -62,8 +62,8 @@ def _find_trace_id(request_id, question):
     while time.time() < deadline:
         try:
             df = client.spans.get_spans_dataframe(
-                project_name=PHOENIX_PROJECT_NAME,
-                start_time=datetime.now() - timedelta(minutes=3),
+                project_name=PHOENIX_RETRIEVE_PROJECT,
+                start_time=datetime.now(timezone.utc) - timedelta(minutes=3),
                 limit=1000,
                 timeout=30,
             )
@@ -94,7 +94,7 @@ def get_answer_from_trace(trace_id):
     output-nya berisi kunci 'content' (jawaban final), bukan plan/intent."""
     client = Client(base_url=PHOENIX_BASE_URL)
     spans = client.spans.get_spans(
-        project_identifier=PHOENIX_PROJECT_NAME,
+        project_identifier=PHOENIX_RETRIEVE_PROJECT,
         trace_ids=[trace_id],
         limit=100,
         timeout=30,
@@ -131,7 +131,7 @@ def get_retrieval_context(request_id, question):
     while time.time() < deadline:
         try:
             spans = client.spans.get_spans(
-                project_identifier=PHOENIX_PROJECT_NAME,
+                project_identifier=PHOENIX_RETRIEVE_PROJECT,
                 trace_ids=[trace_id],
                 limit=100,
                 timeout=30,
@@ -202,8 +202,8 @@ def main():
     if not CHATOPA_URL or not CHATOPA_API_KEY:
         print("Konfigurasi CHATOPA_URL / CHATOPA_API_KEY belum lengkap di .env.")
         return
-    if not PHOENIX_BASE_URL or not PHOENIX_PROJECT_NAME:
-        print("Konfigurasi PHOENIX_BASE_URL / PHOENIX_PROJECT_NAME belum lengkap di .env.")
+    if not PHOENIX_BASE_URL or not PHOENIX_RETRIEVE_PROJECT:
+        print("Konfigurasi PHOENIX_BASE_URL / PHOENIX_RETRIEVE_PROJECT belum lengkap di .env.")
         return
 
     question = input("Pertanyaan: ").strip()
@@ -233,7 +233,7 @@ def main():
         print("request_id tidak ditemukan di response. Cek struktur response.")
         return
 
-    print(f"GET jawaban dari Phoenix: {PHOENIX_BASE_URL} (project={PHOENIX_PROJECT_NAME})")
+    print(f"GET jawaban dari Phoenix: {PHOENIX_BASE_URL} (project={PHOENIX_RETRIEVE_PROJECT})")
     answer = find_answer_in_phoenix(request_id, question)
     if answer is not None:
         print(f"\nJawaban dari Phoenix ({request_id}):\n{answer[:1000]}")
