@@ -135,7 +135,13 @@ def _insights_prompt(insights: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def judge_pipeline(question: str, insights: dict, domain: str = "kelapa sawit") -> dict:
+def judge_pipeline(
+    question: str,
+    insights: dict,
+    answer: str = None,
+    retrieval_context: str = None,
+    domain: str = "kelapa sawit",
+) -> dict:
     """Nilai kualitas PIPELINE chatbot RAG (LLM Judge V2, skala 1-10)."""
     _ensure_tracing()
 
@@ -145,38 +151,98 @@ def judge_pipeline(question: str, insights: dict, domain: str = "kelapa sawit") 
         "PROSES: bagaimana sistem memahami pertanyaan, memperluas query, "
         "bernalar merencanakan retrieval, dan memanfaatkan memori percakapan.\n"
         f"Topik/tema domain: {domain}.\n"
-        "Nilai berdasarkan empat kriteria (skala 1-10):\n"
+        "SKOR WAJIB BILANGAN BULAT 1-10 (dilarang desimal; dilarang 0 kecuali "
+        "untuk ketepatan_sitasi tanpa sitasi/konteks). Pedoman skor:\n"
+        "9-10 = hampir sempurna, semua aspek kunci terpenuhi tanpa kesalahan berarti;\n"
+        "7-8  = baik, aspek kunci terpenuhi dengan kekurangan minor;\n"
+        "5-6  = cukup, ada kekurangan signifikan pada aspek kunci;\n"
+        "3-4  = buruk, banyak aspek kunci gagal;\n"
+        "1-2  = sangat buruk / tidak relevan sama sekali.\n"
+        "ATURAN KEPERCAYAAN:\n"
+        "- Nilai HANYA berdasarkan data JSON trace yang diberikan. DILARANG "
+        "mengarang, berasumsi, atau menambahkan fakta di luar data.\n"
+        "- ANALISIS WAJIB MENDALAM sebelum memberi skor: periksa setiap field "
+        "trace terhadap isi jawaban chatbot dan konteks retrieval. Deteksi "
+        "kesalahan faktual, kontradiksi (mis. `primary_query`/`intent`/`reasoning` "
+        "bertentangan dengan isi jawaban/konteks), dan halusinasi (klaim tanpa "
+        "dukungan data). Kesalahan faktual yang signifikan wajib menurunkan skor "
+        "secara tegas (1-3), jangan memberi nilai sedang demi kesopanan.\n"
+        "- Jika field yang relevan TIDAK ADA atau KOSONG, catat sebagai "
+        "kekurangan dan turunkan skor sesuai dampaknya; jangan menebak.\n"
+        "- `alasan` tiap kriteria WAJIB menyebut bukti konkret dari data dan "
+        "TETAP RINGKAS: 1 kalimat pendek (contoh: 'query mengalihkan fokus dari "
+        "IK-DITN-003/004 ke 007, jadi intent melenceng dari maksud user.').\n"
+        "Nilai berdasarkan lima kriteria (skala 1-10):\n"
         "1. Intent & Understanding: seberapa akurat `primary_query` dan `intent` "
         "hasil extractor mencerminkan maksud pertanyaan user. Nilai tinggi bila "
-        "query utama setia pada maksud asli dan intent benar.\n"
+        "query utama setia pada maksud asli dan intent benar. Nilai rendah bila "
+        "`primary_query` mengubah makna asli (menyempit/melebar) tanpa alasan, "
+        "atau `intent` salah — jika intent salah atau query mengubah makna, "
+        "maksimal 4.\n"
         "2. Query Expansion: seberapa relevan variasi `query_expansions` "
         "(sinonim/istilah/parafrase) untuk memperkaya retrieval tanpa menyimpang "
-        "dari maksud. PENTING: jika percakapan adalah casual chat atau TANPA "
-        "retrieval (skip_retrieval=true / tidak ada data retrieval), otomatis "
-        "nilai 10 karena perluasan query tidak diperlukan.\n"
+        "dari maksud. Nilai 10 HANYA bila `skip_retrieval=true` atau percakapan "
+        "casual chat atau tidak ada data retrieval sama sekali. Bila terdapat "
+        "retrieval, nilai berdasarkan relevansi ekspansi; ekspansi yang "
+        "menyimpang/melenceng dari maksud wajib diturunkan nilainya; dilarang "
+        "memberi 10 tanpa alasan tersebut.\n"
         "3. Reasoning: seberapa logis dan akurat penalaran sistem saat "
         "merencanakan RAG pada field `reasoning` — pemilihan langkah/step, mode "
-        "retrieval, koleksi target sesuai jenis pertanyaan.\n"
+        "retrieval, koleksi target sesuai jenis pertanyaan. Penalaran yang salah "
+        "memilih step/mode/koleksi, bertentangan dengan pertanyaan, atau "
+        "mengarahkan ke dokumen yang salah wajib mendapat nilai rendah.\n"
         "4. Memory Continuity: seberapa harmonis pemanfaatan memori percakapan — "
         "apakah `turn.history`, `session_state`, dan `extractor.memory_queries` "
-        "selaras dengan konteks/perpindahan topik pertanyaan.\n"
-        "Berikan skor 1-10 per kriteria dengan alasan singkat, lalu total "
-        "(rata-rata) dan kesimpulan.\n"
-        "OUTPUT WAJIB BERFORMAT JSON DENGAN STRUKTUR KETAT TANPA KUNCI LAIN.\n"
+        "selaras dengan konteks/perpindahan topik pertanyaan. Nilai 10 HANYA bila "
+        "memori benar-benar diambil/dipakai (`was_retrieved=true` / "
+        "`memory_context` terisi). Bila memori tersedia tapi tidak dimanfaatkan, "
+        "maksimal 7. Alasan harus menyebut apakah memori benar-benar dipakai atau "
+        "hanya tersedia.\n"
+        "5. Ketepatan Sitasi: cocokkan setiap referensi `[n]` ATAU footnote `[^n]` "
+        "yang muncul di jawaban chatbot terhadap isi sumber `[n]` pada konteks "
+        "retrieval (`[n] Sumber:` / `[n] Dokumen Rujukan`). Nilai tinggi bila: "
+        "(a) nomor sumber yang disebut benar-benar ada di konteks, (b) isi yang "
+        "diklaim didukung oleh isi sumber tersebut, (c) tidak ada referensi yang "
+        "salah/disalahgunakan. Referensi yang salah/disalahgunakan wajib "
+        "menurunkan skor secara besar. PENTING: jika jawaban TANPA sitasi "
+        "`[n]`/`[^n]` ATAU tidak ada konteks retrieval sama sekali, berikan skor "
+        "0 (bukan auto-10).\n"
+        "- total = rata-rata kelima skor, dibulatkan 1 desimal, dan WAJIB konsisten "
+        "dengan kelima skor yang diberikan.\n"
+        "- `alasan`: 1 kalimat singkat yang menjelaskan mengapa `total` dicapai "
+        "(alasan utama penilaian).\n"
+        "- `saran`: 1 kalimat singkat berisi perbaikan paling penting yang disarankan.\n"
+        "- `kesimpulan`: ringkasan singkat kualitas pipeline secara keseluruhan.\n"
+        "GAYA BAHASA: tulis `alasan`, `saran`, dan `kesimpulan` dengan bahasa yang "
+        "wajar dan mudah dibaca — natural tapi tetap profesional, tidak kaku atau "
+        "bertele-tele. Gunakan kalimat pendek dan langsung ke poin, hindari kata-kata "
+        "baku berulang (mis. 'Pipeline solid', 'selaras', 'harmonis') dan istilah "
+        "teknis berlebihan. Contoh nada: 'Intent kebaca dengan benar, tapi memori "
+        "tidak dipakai sehingga skornya agak turun.'\n"
+        "RINGKAS: `alasan` per kriteria 1 kalimat pendek, `alasan` total 1 kalimat, "
+        "`saran` 1 kalimat, `kesimpulan` singkat. Analisis boleh dalam, tapi "
+        "teks output tetap ringkas dan merujuk bukti spesifik.\n"
+        "OUTPUT WAJIB BERFORMAT JSON TANPA BLOK MARKDOWN (```), TANPA TEKS DI LUAR "
+        "JSON, TANPA KUNCI TAMBAHAN, TANPA trailing comma.\n"
         'Contoh:\n'
         '{\n'
         '  "intent_understanding": {"skor": 8, "alasan": "..."},\n'
         '  "query_expansion": {"skor": 9, "alasan": "..."},\n'
         '  "reasoning": {"skor": 8, "alasan": "..."},\n'
         '  "memory_continuity": {"skor": 7, "alasan": "..."},\n'
+        '  "ketepatan_sitasi": {"skor": 8, "alasan": "..."},\n'
         '  "total": 8.0,\n'
+        '  "alasan": "...",\n'
+        '  "saran": "...",\n'
         '  "kesimpulan": "..."\n'
         '}'
     )
     user_prompt = (
         f"Data pipeline chatbot RAG:\n\n"
         f"{_insights_prompt(insights)}\n\n"
-        f"Evaluasilah kualitas pipeline di atas berdasarkan 4 kriteria (skala 1-10)."
+        f"Jawaban chatbot:\n{answer if answer else '(tidak ada jawaban)'}\n\n"
+        f"Konteks retrieval:\n{retrieval_context if retrieval_context else '(tidak ada konteks)'}\n\n"
+        f"Evaluasilah kualitas pipeline di atas berdasarkan 5 kriteria (skala 1-10)."
     )
 
     client = get_client()
@@ -198,7 +264,10 @@ def judge_pipeline(question: str, insights: dict, domain: str = "kelapa sawit") 
                 "query_expansion",
                 "reasoning",
                 "memory_continuity",
+                "ketepatan_sitasi",
                 "total",
+                "alasan",
+                "saran",
                 "kesimpulan",
             ):
                 if key not in data:
@@ -254,10 +323,13 @@ def main():
         ("query_expansion", "Query Expansion"),
         ("reasoning", "Reasoning"),
         ("memory_continuity", "Memory Continuity"),
+        ("ketepatan_sitasi", "Ketepatan Sitasi"),
     ):
         item = result.get(key, {})
         print(f"- {label}: {item.get('skor')}/10 — {item.get('alasan')}")
     print(f"- Total: {result.get('total')}/10")
+    print(f"- Alasan: {result.get('alasan')}")
+    print(f"- Saran: {result.get('saran')}")
     print(f"- Kesimpulan: {result.get('kesimpulan')}")
 
 

@@ -1113,30 +1113,35 @@ def load_pipeline_recap() -> pd.DataFrame:
                         "Query Expansion": (rec.get("query_expansion") or {}).get("skor"),
                         "Reasoning": (rec.get("reasoning") or {}).get("skor"),
                         "Memory Continuity": (rec.get("memory_continuity") or {}).get("skor"),
+                        "Citation": (rec.get("ketepatan_sitasi") or {}).get("skor"),
                         "Total": rec.get("total"),
+                        "Alasan": rec.get("alasan"),
+                        "Saran": rec.get("saran"),
                         "Trace ID": rec.get("trace_id"),
                     }
                 )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.iloc[::-1].reset_index(drop=True)
+    return df
 
 
-def _watcher_loop(stop_event, interval: float = 3600.0, hours: int = 24):
-    """Loop background: evaluasi trace staging baru selama app terbuka.
+def _watcher_loop(stop_event, hours: int = 24):
+    """Jalankan evaluasi sekali: baca trace `hours` jam terakhir sampai beres.
 
-    Interval default 1 jam (3600 detik). Jendela waktu baca trace
-    ditentukan oleh `hours` (1/12/24 jam) sesuai pilihan dropdown."""
-    print(f"[WATCHER] Monitoring trace staging dimulai (jendela {hours} jam, tiap {interval / 3600:.0f} jam).")
-    while not stop_event.is_set():
-        try:
-            summary = evaluate_new_traces(hours=hours)
-            if summary["ok"]:
-                print(
-                    f"[WATCHER] Evaluasi baru: ok={summary['ok']} "
-                    f"gagal={summary['gagal']} (total {summary['total']})"
-                )
-        except Exception as e:
-            print(f"[WATCHER] Error: {e}")
-        stop_event.wait(interval)
+    Tidak ada interval berulang — selesai sekali langsung berhenti."""
+    print(f"[WATCHER] Evaluasi dimulai: baca trace {hours} jam terakhir.")
+    try:
+        summary = evaluate_new_traces(hours=hours, stop_event=stop_event)
+        print(
+            f"[WATCHER] Selesai: ok={summary['ok']} gagal={summary['gagal']} "
+            f"dilewati={summary['dilewati']} (total {summary['total']})"
+        )
+    except Exception as e:
+        print(f"[WATCHER] Error: {e}")
+    finally:
+        global WATCHER_STARTED
+        WATCHER_STARTED = False
     print("[WATCHER] Monitoring dihentikan.")
 
 
@@ -1148,10 +1153,9 @@ WATCHER_HOURS = 24
 
 def watcher_status() -> str:
     watcher = (
-        f"**aktif** — menilai trace staging {WATCHER_HOURS} jam terakhir "
-        f"setiap 1 jam."
+        f"**aktif** — menilai trace {WATCHER_HOURS} jam terakhir."
         if WATCHER_STARTED
-        else "**berhenti** — pilih jendela waktu, lalu tekan Start Watcher untuk mulai menilai trace staging baru."
+        else "**berhenti** — pilih jendela waktu, lalu tekan Start Watcher."
     )
     return f"Watcher {watcher}\n\n{tracing_control.status()}"
 
@@ -1190,6 +1194,11 @@ def watcher_stop() -> str:
     WATCHER_THREAD = None
     tracing_control.disable()
     return watcher_status()
+
+
+def _pipeline_tick():
+    """Refresh status watcher + rekap hasil secara berkala (gr.Timer)."""
+    return watcher_status(), load_pipeline_recap()
 
 
 
@@ -1361,7 +1370,10 @@ def main():
                         "Query Expansion",
                         "Reasoning",
                         "Memory Continuity",
+                        "Citation",
                         "Total",
+                        "Alasan",
+                        "Saran",
                         "Trace ID",
                     ],
                     label="Rekap Hasil Evaluasi Pipeline",
@@ -1369,7 +1381,7 @@ def main():
                     interactive=False,
                     wrap=True,
                     line_breaks=True,
-                    column_widths=[150, 360, 130, 120, 90, 130, 75, 240],
+                    column_widths=[140, 300, 110, 100, 85, 110, 90, 65, 220, 220, 200],
                     max_height=420,
                     value=load_pipeline_recap(),
                 )
@@ -1385,6 +1397,14 @@ def main():
                 )
                 pipe_pipeline_refresh_btn.click(
                     load_pipeline_recap, inputs=[], outputs=[pipe_pipeline_recap]
+                )
+                pipe_pipeline_timer = gr.Timer(
+                    value=3, active=True
+                )
+                pipe_pipeline_timer.tick(
+                    _pipeline_tick,
+                    inputs=[],
+                    outputs=[pipe_watch_status, pipe_pipeline_recap],
                 )
 
 
@@ -1568,7 +1588,10 @@ def main():
                         "Query Expansion",
                         "Reasoning",
                         "Memory Continuity",
+                        "Citation",
                         "Total",
+                        "Alasan",
+                        "Saran",
                         "Trace ID",
                     ],
                     label="Rekap Evaluasi Pipeline",
@@ -1577,7 +1600,7 @@ def main():
                     interactive=False,
                     wrap=True,
                     line_breaks=True,
-                    column_widths=[150, 360, 130, 120, 90, 130, 75, 240],
+                    column_widths=[140, 300, 110, 100, 85, 110, 90, 65, 220, 220, 200],
                     max_height=420,
                 )
                 pipe_refresh_btn = gr.Button("Muat Ulang Rekap Pipeline", variant="secondary")

@@ -13,6 +13,7 @@ CHATOPA_URL = os.getenv("CHATOPA_URL")
 CHATOPA_API_KEY = os.getenv("CHATOPA_API_KEY")
 PHOENIX_BASE_URL = os.getenv("PHOENIX_BASE_URL")
 PHOENIX_RETRIEVE_PROJECT = os.getenv("PHOENIX_RETRIEVE_PROJECT") or os.getenv("PHOENIX_PROJECT_NAME")
+PHOENIX_PIPELINE_PROJECT = os.getenv("PHOENIX_PIPELINE_PROJECT", "ChatOPA-production")
 
 POLL_INTERVAL = 2.0
 POLL_TIMEOUT = 60.0
@@ -116,6 +117,50 @@ def get_answer_from_trace(trace_id):
     return None
 
 
+def get_trace_output(trace_id, project_name=None):
+    """Ambil output/jawaban final dari trace bila ada.
+
+    Satu request menghasilkan 2 trace: trace utama berisi span `chat*`
+    (mis. `chatStream` / `chatSync`) dengan output.value JSON
+    {'content': '<jawaban>'}, sedangkan trace kosong (input-only / wrapper)
+    hanya berisi input tanpa output. Fungsi ini mengembalikan teks jawaban
+    bila ada, atau None untuk trace kosong — dipakai untuk memilih trace
+    yang punya output.
+
+    `project_name` default `PHOENIX_RETRIEVE_PROJECT`; watcher dapat
+    meneruskan `PHOENIX_PIPELINE_PROJECT` (production)."""
+    if trace_id is None:
+        return None
+    project = project_name or PHOENIX_RETRIEVE_PROJECT
+    client = Client(base_url=PHOENIX_BASE_URL)
+    try:
+        spans = client.spans.get_spans(
+            project_identifier=project,
+            trace_ids=[trace_id],
+            limit=100,
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"[PHOENIX] Gagal get_spans trace {trace_id}: {e}")
+        return None
+    for span in spans or []:
+        name = span.get("name") or ""
+        if not name.lower().startswith("chat"):
+            continue
+        attrs = span.get("attributes") or {}
+        output_value = attrs.get("output.value")
+        if not isinstance(output_value, str) or not output_value.strip():
+            continue
+        try:
+            data = json.loads(output_value)
+        except (ValueError, TypeError):
+            continue
+        content = data.get("content") if isinstance(data, dict) else None
+        if isinstance(content, str) and content.strip():
+            return content
+    return None
+
+
 def get_retrieval_context(request_id, question):
     """Cari trace via polling, lalu ambil konteks retrieval dari span
     retrieve_context_and_extract. Output.value bisa berupa JSON dict
@@ -154,6 +199,40 @@ def get_retrieval_context(request_id, question):
 
         time.sleep(POLL_INTERVAL)
 
+    return None
+
+
+def get_retrieval_context_from_trace(trace_id, project_name=None):
+    """Ambil konteks retrieval dari span `retrieve_context_and_extract`
+    pada trace yang sudah dikenal (tanpa polling).
+
+    `project_name` default `PHOENIX_RETRIEVE_PROJECT`; watcher dapat
+    meneruskan `PHOENIX_PIPELINE_PROJECT` (production). Return string
+    atau None bila span tidak ada."""
+    if trace_id is None:
+        return None
+    project = project_name or PHOENIX_RETRIEVE_PROJECT
+    client = Client(base_url=PHOENIX_BASE_URL)
+    try:
+        spans = client.spans.get_spans(
+            project_identifier=project,
+            trace_ids=[trace_id],
+            limit=100,
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"[PHOENIX] Gagal get_spans trace {trace_id}: {e}")
+        return None
+    for span in spans or []:
+        if span.get("name") != "retrieve_context_and_extract":
+            continue
+        attrs = span.get("attributes") or {}
+        output_value = attrs.get("output.value")
+        if not isinstance(output_value, str):
+            continue
+        context = _extract_retrieval_context(output_value)
+        if context:
+            return context
     return None
 
 

@@ -14,6 +14,7 @@ CHATOPA_URL = os.getenv("CHATOPA_URL")
 CHATOPA_API_KEY = os.getenv("CHATOPA_API_KEY")
 PHOENIX_BASE_URL = os.getenv("PHOENIX_BASE_URL")
 PHOENIX_RETRIEVE_PROJECT = os.getenv("PHOENIX_RETRIEVE_PROJECT") or os.getenv("PHOENIX_PROJECT_NAME")
+PHOENIX_PIPELINE_PROJECT = os.getenv("PHOENIX_PIPELINE_PROJECT", "ChatOPA-production")
 
 POLL_INTERVAL = 2.0
 POLL_TIMEOUT = 60.0
@@ -199,15 +200,18 @@ def _find_trace_id(request_id, question):
     return None
 
 
-def list_staging_traces(hours: int = 24, limit: int = 200):
+def list_staging_traces(hours: int = 24, limit: int = 200, project_name=None):
     """Daftarkan trace dari project retrieval (staging) tanpa POST.
 
+    `project_name` default `PHOENIX_RETRIEVE_PROJECT`; watcher dapat
+    meneruskan `PHOENIX_PIPELINE_PROJECT` (production).
     Return list dict: [{'trace_id', 'start_time'}], terurut menurun
     berdasarkan waktu mulai."""
+    project = project_name or PHOENIX_RETRIEVE_PROJECT
     client = Client(base_url=PHOENIX_BASE_URL)
     try:
         traces = client.traces.get_traces(
-            project_identifier=PHOENIX_RETRIEVE_PROJECT,
+            project_identifier=project,
             start_time=datetime.now(timezone.utc) - timedelta(hours=hours),
             sort="start_time",
             order="desc",
@@ -227,14 +231,15 @@ def list_staging_traces(hours: int = 24, limit: int = 200):
     return out
 
 
-def _extract_question_from_trace(trace_id):
+def _extract_question_from_trace(trace_id, project_name=None):
     """Ekstrak pertanyaan user dari input span extractor/preprocess pada trace.
 
     Return string pertanyaan atau None bila tidak ditemukan."""
+    project = project_name or PHOENIX_RETRIEVE_PROJECT
     client = Client(base_url=PHOENIX_BASE_URL)
     try:
         spans = client.spans.get_spans(
-            project_identifier=PHOENIX_RETRIEVE_PROJECT,
+            project_identifier=project,
             trace_ids=[trace_id],
             limit=200,
             timeout=30,
@@ -260,13 +265,16 @@ def _extract_question_from_trace(trace_id):
                 return ext["paraphrased_question"]
     return None
 
-def get_pipeline_insights(request_id=None, question=None, trace_id=None):
+def get_pipeline_insights(request_id=None, question=None, trace_id=None, project_name=None):
     """Ambil insight pipeline dari trace Phoenix:
     output extractor (pemahaman, query expansion, reasoning) + input
     (histori turn / session_state / memory) untuk penilaian baru.
 
     `trace_id` opsional: langsung akses trace tanpa polling/request_id.
+    `project_name` default `PHOENIX_RETRIEVE_PROJECT`; watcher dapat
+    meneruskan `PHOENIX_PIPELINE_PROJECT` (production).
     Return dict terstruktur, atau None bila trace/insight tidak ditemukan."""
+    project = project_name or PHOENIX_RETRIEVE_PROJECT
     if not trace_id:
         trace_id = _find_trace_id(request_id, question)
     if trace_id is None:
@@ -279,7 +287,7 @@ def get_pipeline_insights(request_id=None, question=None, trace_id=None):
     while time.time() < deadline:
         try:
             spans = client.spans.get_spans(
-                project_identifier=PHOENIX_RETRIEVE_PROJECT,
+                project_identifier=project,
                 trace_ids=[trace_id],
                 limit=200,
                 timeout=30,
